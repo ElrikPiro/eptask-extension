@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "ElrikPiro Task Manager",
+  "version": "0.1.0",
+  "description": "Gestor de tareas conectado al backend de ElrikPiro",
+  "action": {
+    "default_title": "ElrikPiro Task Manager",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": ["storage", "alarms", "notifications"],
+  "host_permissions": ["http://*/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

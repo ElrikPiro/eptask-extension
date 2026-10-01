@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Configuración · ElrikPiro</title>
+    <link rel="stylesheet" href="css/styles.css">
+  </head>
+  <body class="options-page">
+    <main class="narrow-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">ElrikPiro</p>
+          <h1>Conexión</h1>
+          <p>Configura el servidor HTTP y el token Bearer del gestor.</p>
+        </div>
+        <span id="monitor-badge" class="status-pill offline">Desconectado</span>
+      </header>
+
+      <section class="panel">
+        <form id="settings-form" class="settings-form">
+          <label for="server-url">URL del servidor</label>
+          <input id="server-url" name="serverUrl" type="url" inputmode="url" placeholder="http://servidor:puerto/prefijo" autocomplete="url" required>
+          <small class="caption">Introduce una URL HTTP absoluta. Si tu servidor usa un prefijo de ruta, inclúyelo aquí.</small>
+
+          <label for="token">Token Bearer</label>
+          <input id="token" name="token" type="password" autocomplete="new-password" placeholder="Token de acceso" required>
+          <small class="caption">El token se guarda en el almacenamiento local de esta extensión.</small>
+
+          <div class="button-row">
+            <button id="save-settings" type="submit" class="secondary">Guardar configuración</button>
+            <button id="connect" type="button">Probar y conectar</button>
+          </div>
+        </form>
+      </section>
+
+      <p id="options-message" class="alert info" role="status" aria-live="polite" hidden></p>
+      <section class="panel settings-actions">
+        <div>
+          <h2>Monitor de notificaciones</h2>
+          <p id="monitor-description" class="caption">El monitor permanece inactivo hasta validar la conexión.</p>
+        </div>
+        <div class="button-row">
+          <button id="disconnect" type="button" class="secondary">Desconectar</button>
+          <button id="clear-settings" type="button" class="danger-button">Borrar credenciales</button>
+        </div>
+      </section>
+      <p class="footnote">El gestor y el popup usan esta configuración. La conexión se comprueba con una lectura de agenda.</p>
+    </main>
+    <script type="module" src="js/options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gestor de tareas · ElrikPiro</title>
+    <link rel="stylesheet" href="css/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">ElrikPiro</p>
+          <h1>Gestor de tareas</h1>
+          <p>Planificación, ejecución y seguimiento.</p>
+        </div>
+        <div class="hero-tools">
+          <span id="connection-badge" class="status-pill offline">Desconectado</span>
+          <button id="open-options" type="button" class="secondary">Configuración</button>
+        </div>
+      </header>
+
+      <p id="app-message" class="alert info" role="status" aria-live="polite" hidden></p>
+
+      <nav class="panel nav-bar" aria-label="Vistas del gestor">
+        <div class="button-row">
+          <button type="button" data-view="tasks">Tareas</button>
+          <button type="button" class="secondary" data-view="agenda">Agenda</button>
+          <button type="button" class="secondary" data-view="stats">Estadísticas</button>
+          <button type="button" class="secondary" data-view="events">Eventos</button>
+          <button type="button" class="secondary" data-view="selectedTask">Tarea seleccionada</button>
+        </div>
+      </nav>
+
+      <section class="panel action-bar" aria-label="Acciones principales">
+        <div class="button-row">
+          <button type="button" data-action="refresh-list">Actualizar lista</button>
+          <button type="button" class="secondary" data-action="previous">Anterior</button>
+          <button type="button" class="secondary" data-action="next">Siguiente</button>
+          <button type="button" class="secondary" data-action="get-info">Información</button>
+          <button type="button" class="danger-button" data-action="done">Completar tarea</button>
+          <button type="button" class="secondary" data-action="refresh-agenda">Agenda</button>
+          <button type="button" class="secondary" data-action="refresh-stats">Estadísticas</button>
+          <button type="button" class="secondary" data-action="refresh-events">Eventos</button>
+        </div>
+      </section>
+
+      <main id="main-view" class="layout-grid" aria-live="polite">
+        <section class="panel"><p class="empty">Cargando tareas…</p></section>
+      </main>
+
+      <section class="panel command-panel">
+        <h2>Comandos</h2>
+        <div class="forms-grid">
+          <form id="set-form">
+            <h3>Modificar campo de tarea</h3>
+            <label for="set-param">Campo</label>
+            <input id="set-param" name="param" placeholder="description, context, start, due, severity…" required>
+            <label for="set-value">Valor</label>
+            <input id="set-value" name="value" placeholder="Nuevo valor" required>
+            <button type="submit">Aplicar /set</button>
+          </form>
+          <form id="new-form">
+            <h3>Crear tarea</h3>
+            <label for="new-description">Descripción</label>
+            <input id="new-description" name="description" placeholder="Descripción de la tarea" required>
+            <label for="new-context">Contexto (opcional)</label>
+            <input id="new-context" name="context" placeholder="Contexto">
+            <label for="new-cost">Coste total (opcional)</label>
+            <input id="new-cost" name="totalCost" placeholder="2p">
+            <button type="submit">Crear tarea</button>
+          </form>
+          <form id="work-form">
+            <h3>Registrar trabajo</h3>
+            <label for="work-amount">Cantidad</label>
+            <input id="work-amount" name="amount" value="1p" required>
+            <button type="submit">Aplicar /work</button>
+          </form>
+          <form id="schedule-form">
+            <h3>Programar tarea</h3>
+            <label for="schedule-amount">Trabajo esperado por día (opcional)</label>
+            <input id="schedule-amount" name="amount" placeholder="1p">
+            <button type="submit">Aplicar /schedule</button>
+          </form>
+          <form id="snooze-form">
+            <h3>Posponer tarea</h3>
+            <label for="snooze-amount">Duración</label>
+            <input id="snooze-amount" name="amount" value="5m">
+            <button type="submit">Aplicar /snooze</button>
+          </form>
+          <form id="search-form">
+            <h3>Buscar tareas</h3>
+            <label for="search-terms">Términos</label>
+            <input id="search-terms" name="terms" placeholder="palabras clave" required>
+            <button type="submit">Buscar</button>
+          </form>
+          <form id="project-form">
+            <h3>Comando de proyecto</h3>
+            <label for="project-args">Argumentos</label>
+            <input id="project-args" name="args" placeholder="comando y argumentos" required>
+            <button type="submit">Aplicar /project</button>
+          </form>
+          <form id="raise-form">
+            <h3>Lanzar evento</h3>
+            <label for="event-name">Nombre del evento</label>
+            <input id="event-name" name="eventName" placeholder="Nombre del evento" required>
+            <button type="submit">Aplicar /raise</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel strategies-panel">
+        <h2>Estrategias y filtros</h2>
+        <div class="strategy-grid">
+          <section><h3>Heurísticas</h3><ul id="heuristics-list"></ul></section>
+          <section><h3>Algoritmos</h3><ul id="algorithms-list"></ul></section>
+          <section><h3>Filtros</h3><ul id="filters-list"></ul></section>
+        </div>
+      </section>
+
+      <section class="panel notification-panel">
+        <div class="panel-header">
+          <div><h2>Historial de notificaciones</h2><p class="caption">Copia local de las notificaciones recibidas por el monitor.</p></div>
+          <button id="clear-history" type="button" class="secondary">Vaciar historial</button>
+        </div>
+        <ul id="notification-list" class="notification-list"><li class="empty">Sin notificaciones guardadas.</li></ul>
+      </section>
+    </div>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

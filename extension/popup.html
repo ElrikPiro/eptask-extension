@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ElrikPiro</title>
+    <link rel="stylesheet" href="css/styles.css">
+  </head>
+  <body class="popup-page">
+    <main class="popup-shell" aria-labelledby="popup-title">
+      <header class="popup-header">
+        <div>
+          <p class="eyebrow">ElrikPiro</p>
+          <h1 id="popup-title">Tarea prioritaria</h1>
+        </div>
+        <button id="open-options" class="icon-button" type="button" aria-label="Abrir configuración" title="Configuración">⚙</button>
+      </header>
+      <p id="popup-status" class="status-line" role="status" aria-live="polite">Cargando estado…</p>
+      <section id="urgent-task" class="urgent-card" aria-live="polite" aria-label="Tarea más urgente">
+        <p class="empty">Cargando tarea…</p>
+      </section>
+      <div class="popup-actions">
+        <button id="refresh-agenda" type="button" class="secondary">Actualizar</button>
+        <button id="open-manager" type="button">Abrir gestor</button>
+      </div>
+    </main>
+    <script type="module" src="js/popup.js"></script>
+  </body>
+</html>
