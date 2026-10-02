@@ -509,20 +509,21 @@
       throw failure('invalid-response', 'Lote de notificaciones no válido', response.status);
     }
     if (entries.length) {
+      const safeEntries = redact(entries, settings.token);
       await write(async () => {
         const values = await api(native.storage.local,'get',HISTORY);
         const previous = Array.isArray(values[HISTORY]) ? values[HISTORY] : [];
         const receivedAt = new Date().toISOString();
-        const additions = entries.map(entry => ({localId:localId(),message:entry.message,timestamp:entry.timestamp,receivedAt}));
+        const additions = safeEntries.map(entry => ({localId:localId(),message:entry.message,timestamp:entry.timestamp,receivedAt}));
         await api(native.storage.local,'set',{[HISTORY]:previous.concat(additions).slice(-500)});
       });
-      if (revision === version && (await readSettings()).monitorEnabled) await notify(`${entries.length} notificaciones de ElrikPiro`,entries.map(entry => entry.message).join('\n').slice(0,500));
+      if (revision === version && (await readSettings()).monitorEnabled) await notify(`${entries.length} notificaciones de ElrikPiro`,safeEntries.map(entry => entry.message).join('\n').slice(0,500));
     } else {
       const current = await activeSettings();
       if (revision !== version) return;
       const tasks = agenda(await http(current,'agenda')).data.active_urgent_tasks;
       if (revision === version) await setUrgencyBadge(tasks.length > 0, version);
-      if (revision === version && (await readSettings()).monitorEnabled && tasks[0] && tasks[0].context === 'alert') await notify('Tarea urgente · ElrikPiro',tasks[0].description.slice(0,500));
+      if (revision === version && (await readSettings()).monitorEnabled && tasks[0] && tasks[0].context === 'alert') await notify('Tarea urgente · ElrikPiro',redact(tasks[0].description, current.token).slice(0,500));
     }
     await write(() => api(native.storage.local,'set',{[STATUS]:{updatedAt:new Date().toISOString(),ok:true,status:response.status}}));
   }
