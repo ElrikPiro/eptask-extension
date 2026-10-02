@@ -125,11 +125,17 @@ test("only the background owns HTTP; UI reads local notification history and ren
   assert.doesNotMatch(uiSource, /\.innerHTML\s*=|insertAdjacentHTML\s*\(/);
 });
 
-test("popup reads the first agenda task without selecting it or reading task information", () => {
+test("popup reads the first agenda task and exposes only identity-checked urgent-task actions", () => {
   const popup = read("js/popup.js");
+  const html = read("popup.html");
   assert.match(popup, /GET_AGENDA/);
   assert.match(popup, /active_urgent_tasks\[0\]/);
   assert.doesNotMatch(popup, /GET_INFO|SELECT_TASK|task_1|\/info/);
+  assert.match(popup, /"POPUP_DONE"/);
+  assert.match(popup, /"POPUP_SNOOZE"/);
+  assert.match(popup, /expectedTask/);
+  assert.match(html, /id="complete-task"[^>]*disabled>Completar/);
+  assert.match(html, /id="snooze-task"[^>]*disabled>Posponer 5 minutos/);
 });
 
 test("manager markup and handlers cover the current TaskManagerApi operation families", () => {

@@ -19,8 +19,12 @@
       <section id="urgent-task" class="urgent-card" aria-live="polite" aria-label="Tarea más urgente">
         <p class="empty">Cargando tarea…</p>
       </section>
+      <div class="popup-task-actions" role="group" aria-label="Acciones de la tarea prioritaria">
+        <button id="complete-task" type="button" disabled>Completar</button>
+        <button id="snooze-task" type="button" class="secondary" disabled>Posponer 5 minutos</button>
+      </div>
       <div class="popup-actions">
-        <button id="refresh-agenda" type="button" class="secondary">Actualizar</button>
+        <button id="refresh-agenda" type="button" class="secondary" disabled>Actualizar</button>
         <button id="open-manager" type="button">Abrir gestor</button>
       </div>
     </main>

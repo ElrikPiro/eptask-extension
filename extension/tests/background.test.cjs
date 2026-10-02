@@ -8,6 +8,7 @@ const SETTINGS_KEY = "settings.v1";
 const HISTORY_KEY = "notificationHistory.v1";
 const STATUS_KEY = "monitorStatus.v1";
 const ALARM = "eptask-notification-monitor";
+const URGENCY_ALARM = "eptask-urgent-indicator";
 
 function activeSettings(overrides = {}) {
   return {
@@ -104,6 +105,7 @@ test("dependent task action reselection and ID check stay in FIFO order; argumen
     "/prefix/api/list",
     "/prefix/api/task_7",
     "/prefix/api/set",
+    "/prefix/api/agenda",
   ]);
   assert.equal(new URL(env.requests[2].url).searchParams.get("args"), "due tomorrow & details?");
   assert.equal(env.requests.every((request) => request.init.method === "GET" && request.init.body === undefined), true);
@@ -176,7 +178,7 @@ test("page-two selection restores pagination inside one FIFO group before UID va
 
   assert.equal(reply.ok, true);
   assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), [
-    "/prefix/api/list", "/prefix/api/next", "/prefix/api/task_1", "/prefix/api/work",
+    "/prefix/api/list", "/prefix/api/next", "/prefix/api/task_1", "/prefix/api/work", "/prefix/api/agenda",
   ]);
 });
 
@@ -426,20 +428,27 @@ test("a second alarm received during a monitor cycle is ignored without overlapp
   assert.equal(env.requests.filter((request) => request.url.endsWith("/agenda")).length, 1);
 });
 
-test("alarm reconciliation creates one five-minute alarm and preserves a valid existing one", async () => {
+test("alarm reconciliation creates separate five-minute monitor and urgency alarms", async () => {
   const env = bootBackground({ fetch: async () => json(agenda()) });
-  await waitFor(() => env.alarmCreates.length === 1, "initial monitor alarm");
-  assert.equal(env.alarmCreates[0].name, ALARM);
-  assert.equal(env.alarmCreates[0].info.periodInMinutes, 5);
-  assert.equal(env.alarmCreates[0].info.delayInMinutes, 5);
+  await waitFor(() => env.alarmCreates.length === 2, "initial background alarms");
+  const monitorAlarm = env.alarmCreates.find((alarm) => alarm.name === ALARM);
+  const urgencyAlarm = env.alarmCreates.find((alarm) => alarm.name === URGENCY_ALARM);
+  assert.ok(monitorAlarm);
+  assert.ok(urgencyAlarm);
+  for (const alarm of [monitorAlarm, urgencyAlarm]) {
+    assert.equal(alarm.info.periodInMinutes, 5);
+    assert.equal(alarm.info.delayInMinutes, 5);
+  }
 
   const scheduledTime = env.alarmData.get(ALARM).scheduledTime;
+  const urgencyScheduledTime = env.alarmData.get(URGENCY_ALARM).scheduledTime;
   env.events.installed.fire({ reason: "update" });
   env.events.startup.fire();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.alarmCreates.length, 1);
+  assert.equal(env.alarmCreates.length, 2);
   assert.equal(env.alarmData.get(ALARM).scheduledTime, scheduledTime);
+  assert.equal(env.alarmData.get(URGENCY_ALARM).scheduledTime, urgencyScheduledTime);
   assert.equal(env.requests.length, 0, "reconciling an alarm does not start an immediate monitor request");
 });
 

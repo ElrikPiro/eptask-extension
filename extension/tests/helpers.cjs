@@ -38,7 +38,7 @@ function response(body, status = 200, contentType = "application/json") {
   };
 }
 
-function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test" } = {}) {
+function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test", supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
   const changes = createEvent();
   const localData = clone(initialStorage) || {};
   const storageWrites = [];
@@ -46,6 +46,8 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
   const alarmData = new Map();
   const alarmCreates = [];
   const notificationCalls = [];
+  const badgeState = { text: "", textColor: null, backgroundColor: null };
+  const actionCalls = [];
   const runtime = {
     id: extensionId,
     lastError: null,
@@ -132,18 +134,55 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
     },
   };
 
+  const action = {
+    setBadgeText(details, callback) {
+      badgeState.text = details.text;
+      actionCalls.push({ method: "setBadgeText", details: clone(details) });
+      timeline.push({ type: "action.setBadgeText", details: clone(details) });
+      if (callback) callback();
+      return mode === "browser" ? Promise.resolve() : undefined;
+    },
+    setBadgeBackgroundColor(details, callback) {
+      badgeState.backgroundColor = clone(details.color);
+      actionCalls.push({ method: "setBadgeBackgroundColor", details: clone(details) });
+      timeline.push({ type: "action.setBadgeBackgroundColor", details: clone(details) });
+      if (callback) callback();
+      return mode === "browser" ? Promise.resolve() : undefined;
+    },
+  };
+  if (supportsBadgeTextColor) {
+    action.setBadgeTextColor = function (details, callback) {
+      actionCalls.push({ method: "setBadgeTextColor", details: clone(details) });
+      timeline.push({ type: "action.setBadgeTextColor", details: clone(details) });
+      if (failBadgeTextColor) {
+        if (callback) {
+          runtime.lastError = { message: "Badge text color is unavailable" };
+          callback();
+          runtime.lastError = null;
+          return undefined;
+        }
+        return Promise.reject(new Error("Badge text color is unavailable"));
+      }
+      badgeState.textColor = clone(details.color);
+      if (callback) callback();
+      return mode === "browser" ? Promise.resolve() : undefined;
+    };
+  }
+
   const tabs = {
     create: callbackMethod(async (properties) => ({ id: 1, ...properties }), mode),
   };
 
   return {
-    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs },
+    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs, action },
     localData,
     storageWrites,
     timeline,
     alarmData,
     alarmCreates,
     notificationCalls,
+    badgeState,
+    actionCalls,
     events: { changes, runtime: runtime.onMessage, installed: runtime.onInstalled, startup: runtime.onStartup, alarm: alarms.onAlarm },
     extensionId,
   };
@@ -159,8 +198,8 @@ function callbackMethod(implementation, mode) {
   };
 }
 
-function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride } = {}) {
-  const api = createApi({ mode, initialStorage });
+function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
+  const api = createApi({ mode, initialStorage, supportsBadgeTextColor, failBadgeTextColor });
   const requests = [];
   const fetcher = fetch || (async () => response({}));
   const recordedFetch = async (url, init) => {

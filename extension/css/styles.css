@@ -155,6 +155,8 @@ pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(
 .task-context { display: inline-block; padding: 0.25rem 0.55rem; border-radius: 999px; background: rgba(32, 82, 71, 0.12); color: var(--primary); font-size: 0.78rem; font-weight: 700; }
 .urgent-details { display: grid; gap: 0.4rem; margin: 0; }
 .urgent-details .key-value-row { font-size: 0.85rem; }
+.popup-task-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.popup-task-actions button { width: 100%; min-height: 2.65rem; }
 .popup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
 .popup-actions button { width: 100%; }
 
