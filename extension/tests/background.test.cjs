@@ -336,6 +336,54 @@ test("a nonempty batch is persisted before one grouped notification and history 
   assert.match(env.requests[0].url, /\/notifications\?mask_as_read=true$/);
 });
 
+for (const mode of ["browser", "chrome"]) {
+  test(`${mode} monitor redacts the token in stored messages, timestamps and grouped notices`, async () => {
+    const token = "test-bearer-token";
+    const batch = [
+      { message: `First ${token}; repeated ${token}`, timestamp: `time-${token}` },
+      { message: "Unaffected message", timestamp: "backend-time" },
+    ];
+    const env = bootBackground({
+      mode,
+      initialStorage: { [SETTINGS_KEY]: activeSettings({ token }) },
+      fetch: async () => json(batch),
+    });
+    await fireAndWaitForStatus(env);
+
+    assert.deepEqual(env.localData[HISTORY_KEY].map(({ message, timestamp }) => ({ message, timestamp })), [
+      { message: "First [redactado]; repeated [redactado]", timestamp: "time-[redactado]" },
+      { message: "Unaffected message", timestamp: "backend-time" },
+    ]);
+    assert.equal(env.notificationCalls.length, 1);
+    assert.equal(env.notificationCalls[0].options.message, "First [redactado]; repeated [redactado]\nUnaffected message");
+    assert.equal(JSON.stringify(env.localData[HISTORY_KEY]).includes(token), false);
+    assert.equal(JSON.stringify(env.notificationCalls).includes(token), false);
+    assert.equal(env.requests.length, 1);
+    assert.equal(env.requests[0].init.headers.Authorization, `Bearer ${token}`);
+  });
+
+  test(`${mode} monitor redacts alert descriptions before truncating native notices`, async () => {
+    const token = "test-bearer-token";
+    const description = `${token} ${"x".repeat(470)} ${token} suffix`;
+    const env = bootBackground({
+      mode,
+      initialStorage: { [SETTINGS_KEY]: activeSettings({ token }) },
+      fetch: async (url) => String(url).includes("/notifications")
+        ? json([])
+        : json(agenda([task("1", "alert", description)])),
+    });
+    await fireAndWaitForStatus(env);
+
+    const expected = `[redactado] ${"x".repeat(470)} [redactado] suffix`.slice(0, 500);
+    assert.equal(env.notificationCalls.length, 1);
+    assert.equal(env.notificationCalls[0].options.message, expected);
+    assert.equal(JSON.stringify(env.notificationCalls).includes(token), false);
+    assert.equal(env.localData[HISTORY_KEY], undefined);
+    assert.equal(env.requests.length, 2);
+    assert.ok(env.requests.every(({ init }) => init.headers.Authorization === `Bearer ${token}`));
+  });
+}
+
 test("HTTP and malformed notification failures terminate before agenda and do not notify", async (t) => {
   const scenarios = [
     { name: "unauthorized response", first: async () => response("Unauthorized", 401, "text/plain") },
