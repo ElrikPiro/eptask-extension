@@ -2,7 +2,7 @@
 
 La extensión vive en `extension/` y usa HTML, CSS y JavaScript nativos. No comparte el runtime del frontend React y no requiere instalación de paquetes ni compilación. El manifiesto activo es `extension/manifest.json`; las variantes fuente `manifest.chromium.json` y `manifest.firefox.json` se copian manualmente antes de cargarla.
 
-**Estado:** prototipo implementado con suite automatizada aprobada. Validación aceptada por el usuario el 2026-10-02 en **Firefox 140.13.0esr y Chromium 150+**; no se afirma compatibilidad con versiones anteriores.
+**Estado:** prototipo implementado con suite automatizada aprobada. Compatibilidad validada en **Firefox 140.13.0esr y Chromium 150+**; no se afirma compatibilidad con versiones anteriores.
 
 ## Cargar en Chromium
 
@@ -20,25 +20,25 @@ Al cambiar de navegador, copia la variante correspondiente al `manifest.json` ra
 
 ## Transporte
 
-El soporte HTTPS queda pendiente del futuro SDD-002. Esta documentación omite afirmaciones de soporte HTTP y no presenta HTTPS como implementado. Las restricciones actuales del código deben revisarse al abordar ese diseño.
+El soporte HTTPS está pendiente de implementación.
 
 ## Configuración
 
-La página **Configuración** contiene el endpoint, el token Bearer y la acción **Probar y conectar**. La definición de transporte se concretará en SDD-002. La prueba consulta `/agenda`; solo cuando la respuesta tiene la estructura esperada queda habilitado el monitor.
+La página **Configuración** contiene el endpoint, el token Bearer y la acción **Probar y conectar**. La prueba consulta `/agenda`; solo cuando la respuesta tiene la estructura esperada queda habilitado el monitor.
 
 El popup muestra la primera tarea de `active_urgent_tasks` y el gestor abre en una pestaña nueva. El monitor funciona en background con una alarma nominal de cinco minutos. Las páginas leen la configuración y el historial local de la extensión; abrirlas no consume la cola del backend.
 
-## Indicador y acciones rápidas (OLDR 7–8)
+## Indicador y acciones rápidas
 
-**Estado OLDR 7–8:** implementación integrada y suite local aprobada con mocks (4 archivos de prueba, 0 fallos). Validación real aceptada por el usuario en Firefox 140.13.0esr y Chromium 150+ el 2026-10-02.
+**Estado:** implementación integrada y suite local aprobada con mocks (4 archivos de prueba, 0 fallos). Compatibilidad validada en Firefox 140.13.0esr y Chromium 150+.
 
-La ampliación OLDR 7–8 muestra un badge de acción con un punto textual cuando una lectura válida de `/agenda` encuentra urgentes activas y permite completar o posponer cinco minutos la primera urgente mostrada desde el popup. Se intenta mostrar el punto rojo sobre fondo transparente con las APIs nativas de color del badge; si el navegador no admite ese ajuste o lo rechaza, se usa fondo rojo. El indicador se consulta con una alarma independiente de cinco minutos; esa lectura usa `/agenda` y nunca consume `/notifications`, por lo que el monitor de notificaciones mantiene su propio ciclo. La conexión, una lectura del popup, una acción y la desconexión también actualizan o limpian el indicador. Los mocks validan colores y fallback; el usuario da por aceptada la validación visual en Firefox 140.13.0esr y Chromium 150+.
+La extensión muestra un badge de acción con un punto textual cuando una lectura válida de `/agenda` encuentra urgentes activas y permite completar o posponer cinco minutos la primera urgente mostrada desde el popup. Se intenta mostrar el punto rojo sobre fondo transparente con las APIs nativas de color del badge; si el navegador no admite ese ajuste o lo rechaza, se usa fondo rojo. El indicador se consulta con una alarma independiente de cinco minutos; esa lectura usa `/agenda` y nunca consume `/notifications`, por lo que el monitor de notificaciones mantiene su propio ciclo. La conexión, una lectura del popup, una acción y la desconexión también actualizan o limpian el indicador. Los mocks validan colores y fallback; la apariencia se ha validado en Firefox 140.13.0esr y Chromium 150+.
 
 Las acciones envían la identidad mostrada (`id`, `description` y `context`) al background. Este vuelve a leer la agenda y recorre el listado paginado dentro de un grupo FIFO para localizar la fila coincidente antes de seleccionar y mutar. También exige que la respuesta de selección coincida en descripción y contexto aunque el ID sea conocido; el backend puede reenumerar IDs JSON y compartir la selección con otros clientes. Si la tarea cambió, no está en el listado vigente o no se puede identificar de forma única, la acción se rechaza sin mutar; si los filtros del gestor ocultan esa urgente, vuelve al gestor y actualiza o ajusta allí los filtros. El snooze envía al backend exactamente `5m`.
 
 La estabilidad del ID depende del proveedor del backend. En el proveedor JSON, TaskProvider reenumera desde cero las tareas no completadas cada vez que reconstruye la lista. En el proveedor Obsidian, ObsidianTaskModel calcula un MD5 a partir de la descripción, la ruta del archivo y la línea; cambios en esos valores pueden cambiarlo. Por eso la extensión vuelve a comprobar los tres campos de identidad contra agenda y listado antes de actuar. Además, la selección y la página son compartidas por el gestor web y otros clientes. El grupo FIFO evita que se intercalen operaciones de las páginas de esta extensión, pero el backend actual no ofrece una acción atómica por UID que evite una carrera con clientes externos.
 
-La resolución de la coexistencia de consumidores queda pendiente del futuro SDD-002. **Mientras tanto, un solo lector debe consumir la cola destructiva de notificaciones.** El frontend React conectado llama a `/notifications?mask_as_read=true` cada 20 segundos y el backend no separa colas por cliente. Antes de dejar activo el monitor de la extensión, cierra o desconecta el frontend web y detén cualquier otro consumidor de esa ruta. El frontend web no ofrece un control para desactivar únicamente este sondeo. Si varios lectores siguen conectados, pueden repartirse las notificaciones y el historial de la extensión no podrá recuperar las entradas que haya consumido otro cliente.
+La coordinación automática de consumidores está pendiente de implementación. **Un solo lector debe consumir la cola destructiva de notificaciones.** El frontend React conectado llama a `/notifications?mask_as_read=true` cada 20 segundos y el backend no separa colas por cliente. Antes de dejar activo el monitor de la extensión, cierra o desconecta el frontend web y detén cualquier otro consumidor de esa ruta. El frontend web no ofrece un control para desactivar únicamente este sondeo. Si varios lectores siguen conectados, pueden repartirse las notificaciones y el historial de la extensión no podrá recuperar las entradas que haya consumido otro cliente.
 
 ## Pruebas locales
 
@@ -48,7 +48,7 @@ Con Node.js 20 o posterior, ejecuta desde `extension/`:
 node --test tests/*.test.cjs
 ```
 
-La suite usa solo `node:test`, `node:vm` y mocks locales de las APIs WebExtension y `fetch`; no instala dependencias ni necesita el backend. La validación real aceptada por el usuario cubre Firefox 140.13.0esr y Chromium 150+.
+La suite usa solo `node:test`, `node:vm` y mocks locales de las APIs WebExtension y `fetch`; no instala dependencias ni necesita el backend. La compatibilidad validada cubre Firefox 140.13.0esr y Chromium 150+.
 
 ## Compatibilidad de identidad de tareas
 
