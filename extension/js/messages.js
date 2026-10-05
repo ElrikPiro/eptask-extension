@@ -2,6 +2,8 @@ import { browserApi } from "./browser-api.js";
 
 const PROTOCOL_VERSION = 1;
 const EMPTY = Object.freeze({});
+const CHANGE_EVENT = "changes.invalidated";
+const CHANGE_COLLECTIONS = new Set(["tasks", "projects", "events", "statistics", "agenda"]);
 const ERROR_TEXT = Object.freeze({
   "invalid-request": "La solicitud no es válida.",
   "unauthorized-sender": "La extensión rechazó este remitente.",
@@ -85,14 +87,31 @@ function validateReply(reply, requestId, operationId = null) {
   return reply;
 }
 
-export function sendRequest(operation, target = null, parameters = EMPTY, {operationId = null, modifying = false} = {}) {
+function assertCurrentBeforeSend(beforeSend, operationId = null) {
+  if (typeof beforeSend !== "function") return;
+  let current = false;
+  try { current = beforeSend() === true; } catch { /* A stale local view must not dispatch a write. */ }
+  if (!current) {
+    throw new GatewayRequestError({
+      kind: "invalid-request",
+      message: "La configuración cambió antes de enviar la acción.",
+      operationId,
+      effectsState: "none",
+    });
+  }
+}
+
+export function sendRequest(operation, target = null, parameters = EMPTY, {operationId = null, modifying = false, beforeSend = null} = {}) {
   if (typeof operation !== "string" || !operation) {
     return Promise.reject(new GatewayRequestError({kind: "invalid-request"}));
   }
   let requestId = createUuid();
   if (operationId && requestId === operationId) requestId = createUuid();
   const envelope = {protocolVersion: PROTOCOL_VERSION, requestId, operation, target, parameters};
-  return Promise.resolve().then(() => browserApi.runtime.sendMessage(envelope)).then(
+  return Promise.resolve().then(() => {
+    assertCurrentBeforeSend(beforeSend, operationId);
+    return browserApi.runtime.sendMessage(envelope);
+  }).then(
     reply => {
       try {
         return validateReply(reply, requestId, operationId);
@@ -103,11 +122,66 @@ export function sendRequest(operation, target = null, parameters = EMPTY, {opera
         throw error;
       }
     },
-    () => {
+    error => {
+      if (error instanceof GatewayRequestError) throw error;
       const kind = modifying ? "uncertain" : "gateway-unavailable";
       throw new GatewayRequestError({kind, requestId, operationId, effectsState: modifying ? "unknown" : null});
     },
   );
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, allowed, required = allowed) {
+  return isPlainObject(value) &&
+    Object.keys(value).every(key => allowed.includes(key)) &&
+    required.every(key => Object.hasOwn(value, key));
+}
+
+function validChangeIds(values) {
+  return Array.isArray(values) && values.length <= 10000 && values.every(value =>
+    typeof value === "string" && value.length > 0 && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value),
+  );
+}
+
+function readInvalidation(message, sender) {
+  const backgroundUrls = [
+    browserApi.runtime.getURL("background.js"),
+    browserApi.runtime.getURL("_generated_background_page.html"),
+  ];
+  if (!sender || typeof browserApi.runtime.id !== "string" || sender.id !== browserApi.runtime.id ||
+      !backgroundUrls.includes(sender.url)) return null;
+  if (!exactKeys(message, ["protocolVersion", "event", "changes"]) ||
+      message.protocolVersion !== PROTOCOL_VERSION || message.event !== CHANGE_EVENT ||
+      !exactKeys(message.changes, ["taskIds", "projectNames", "eventNames", "collections"])) return null;
+  const changes = message.changes;
+  if (!validChangeIds(changes.taskIds) || !validChangeIds(changes.projectNames) ||
+      !validChangeIds(changes.eventNames) || !Array.isArray(changes.collections) ||
+      changes.collections.length > CHANGE_COLLECTIONS.size ||
+      !changes.collections.every(value => CHANGE_COLLECTIONS.has(value)) ||
+      new Set(changes.collections).size !== changes.collections.length) return null;
+  return Object.freeze({
+    taskIds: Object.freeze([...changes.taskIds]),
+    projectNames: Object.freeze([...changes.projectNames]),
+    eventNames: Object.freeze([...changes.eventNames]),
+    collections: Object.freeze([...changes.collections]),
+  });
+}
+
+export function subscribeChanges(listener) {
+  const event = browserApi.runtime.onMessage;
+  if (typeof listener !== "function" || !event?.addListener) return () => {};
+  const handler = (message, sender) => {
+    const changes = readInvalidation(message, sender);
+    if (!changes) return;
+    try { listener(changes); } catch { /* UI listeners cannot affect the gateway response. */ }
+  };
+  event.addListener(handler);
+  return () => event.removeListener?.(handler);
 }
 
 function canonicalizeServerUrl(candidate) {
@@ -167,9 +241,14 @@ function requestHostPermission(serverUrl) {
   }, () => { throw new GatewayRequestError({kind: "permission-denied"}); });
 }
 
-export function gatewayCall(operation, args = {}) {
+export function gatewayCall(operation, args = {}, {isCurrent = null} = {}) {
   if (operation === "GET_AGENDA") {
-    return sendRequest("agenda.read", null, {}).then(reply => {
+    if (!exactKeys(args, ["day", "heuristic"], ["day", "heuristic"]) ||
+        typeof args.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(args.day) ||
+        typeof args.heuristic !== "string" || !args.heuristic.trim()) {
+      return Promise.reject(new GatewayRequestError({kind: "invalid-request"}));
+    }
+    return sendRequest("agenda.read", null, {day: args.day, heuristic: args.heuristic}).then(reply => {
       const embedded = reply.data?._embedded;
       if (!embedded || !Array.isArray(embedded.activeUrgentTasks)) {
         throw new GatewayRequestError({kind: "invalid-response", requestId: reply.requestId});
@@ -187,18 +266,23 @@ export function gatewayCall(operation, args = {}) {
   }
   if (operation === "POPUP_DONE" || operation === "POPUP_SNOOZE") {
     const shown = args?.expectedTask;
-    if (!shown || typeof shown.id !== "string" || !shown.id || typeof shown.description !== "string" || typeof shown.context !== "string") {
+    if (!isPlainObject(shown) || !exactKeys(shown, ["id"], ["id"]) ||
+        typeof shown.id !== "string" || !shown.id ||
+        !exactKeys(args, ["expectedTask", "day", "heuristic"], ["expectedTask", "day", "heuristic"]) ||
+        typeof args.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(args.day) ||
+        typeof args.heuristic !== "string" || !args.heuristic.trim() || typeof isCurrent !== "function") {
       return Promise.reject(new GatewayRequestError({kind: "invalid-request"}));
     }
-    return sendRequest("agenda.read", null, {}).then(reply => {
+    return sendRequest("agenda.read", null, {day: args.day, heuristic: args.heuristic}).then(reply => {
+      assertCurrentBeforeSend(isCurrent);
       const agenda = reply.data?._embedded?.activeUrgentTasks;
       const current = Array.isArray(agenda) ? agenda[0] : null;
-      if (!current || current.id !== shown.id || current.description !== shown.description || current.context !== shown.context) {
+      if (!current || current.id !== shown.id) {
         throw new GatewayRequestError({kind: "task-changed", requestId: reply.requestId});
       }
       const type = operation === "POPUP_DONE" ? "complete-task" : "snooze-task";
       const parameters = operation === "POPUP_DONE" ? {} : {duration: "5m"};
-      return submitOperation(type, {kind: "task", id: shown.id}, parameters);
+      return submitOperation(type, {kind: "task", id: shown.id}, parameters, {beforeSend: isCurrent});
     });
   }
   return Promise.reject(new GatewayRequestError({kind: "unsupported-operation"}));
@@ -208,10 +292,10 @@ export function readGateway(operation, target = null, parameters = EMPTY) {
   return sendRequest(operation, target, parameters);
 }
 
-export function submitOperation(type, target, parameters = EMPTY) {
+export function submitOperation(type, target, parameters = EMPTY, {beforeSend = null} = {}) {
   const operationId = createUuid();
   const operationParameters = {id: operationId, type, parameters};
-  return sendRequest("operations.submit", target, operationParameters, {operationId, modifying: true});
+  return sendRequest("operations.submit", target, operationParameters, {operationId, modifying: true, beforeSend});
 }
 
 export const settingsMessages = Object.freeze({

@@ -50,6 +50,8 @@ function invoke(owner, methodName, args = []) {
 
 export const browserApi = Object.freeze({
   runtime: Object.freeze({
+    id: namespace.runtime.id,
+    onMessage: namespace.runtime.onMessage,
     sendMessage: (message) => invoke(namespace.runtime, "sendMessage", [message]),
     openOptionsPage: () => invoke(namespace.runtime, "openOptionsPage"),
     getURL: (path) => namespace.runtime.getURL(path),

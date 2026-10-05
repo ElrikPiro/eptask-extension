@@ -1,5 +1,5 @@
 import { browserApi } from "./browser-api.js";
-import { gatewayCall, assertSuccessfulReply } from "./messages.js";
+import { gatewayCall, readGateway, assertSuccessfulReply, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
 import { node } from "./render.js";
 
@@ -31,6 +31,7 @@ const SAFE_ERRORS = Object.freeze({
   "task-missing": "La tarea ya no está disponible en la agenda.",
   "task-ambiguous": "La agenda contiene identidades repetidas; no se aplicó la acción.",
 });
+const POPUP_HEURISTIC = "Remaining Effort(1)";
 
 let extensionState = null;
 let stateLoaded = false;
@@ -41,6 +42,7 @@ let agendaRevision = 0;
 let actionRevision = 0;
 let activeAction = null;
 let needsRefreshBeforeAction = false;
+let currentAgendaQuery = null;
 
 function settingsAreReady() {
   return stateLoaded && isReady(extensionState?.settings);
@@ -93,11 +95,16 @@ function renderTask(task) {
   const context = node("span", task.context || "Sin contexto", "task-context");
   const description = node("h2", task.description || "Tarea sin descripción");
   const details = node("dl", null, "urgent-details");
-  const cost = Number(task.total_cost);
+  const rawCost = task.total_cost;
+  const costValue = typeof rawCost === "string" && /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(rawCost) &&
+    Number.isFinite(Number(rawCost))
+    ? rawCost
+    : typeof rawCost === "number" && Number.isFinite(rawCost) ? String(rawCost) : null;
+  const costLabel = costValue === null ? "—" : `${costValue}p`;
   for (const [label, value] of [
     ["Vence", task.due || "—"],
     ["Estado", task.status || "—"],
-    ["Coste restante", Number.isFinite(cost) ? `${cost.toFixed(2)}p` : "—"],
+    ["Coste restante", costLabel],
   ]) {
     const row = node("div", null, "key-value-row");
     row.append(node("dt", label, "key"), node("dd", value, "value"));
@@ -117,19 +124,17 @@ function popupAgendaTasks(agenda) {
         typeof task.context !== "string") return null;
     if (!Object.hasOwn(task, "totalCost") && !Object.hasOwn(task, "investedEffort")) return task;
     const total = task.totalCost;
-    const invested = task.investedEffort;
-    const totalValue = total && total.unit === "pomodoro" ? Number(total.value) : Number.NaN;
-    const investedValue = invested && invested.unit === "pomodoro" ? Number(invested.value) : Number.NaN;
-    const remaining = Number.isFinite(totalValue) && Number.isFinite(investedValue)
-      ? Math.max(0, totalValue - investedValue)
-      : Number.NaN;
+    const totalValue = total && total.unit === "pomodoro" && typeof total.value === "string" &&
+      /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(total.value) && Number.isFinite(Number(total.value))
+      ? total.value
+      : null;
     return {
       id: task.id,
       description: task.description,
       context: task.context,
       due: task.due,
       status: task.status,
-      total_cost: remaining,
+      total_cost: totalValue,
     };
   });
 }
@@ -144,10 +149,32 @@ function isCurrentAgendaRequest(requestRevision, requestSettingsRevision) {
     settingsAreReady();
 }
 
+function currentCivilDay(timeZone) {
+  const invalidTimeZone = message => Object.assign(new Error(message), { kind: "invalid-response" });
+  if (typeof timeZone !== "string" || !timeZone.trim()) throw invalidTimeZone("El servidor no indicó su zona horaria.");
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+  } catch {
+    throw invalidTimeZone("La zona horaria del servidor no es válida.");
+  }
+  const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+  if (!/^\d{4}$/.test(values.year || "") || !/^\d{2}$/.test(values.month || "") || !/^\d{2}$/.test(values.day || "")) {
+    throw invalidTimeZone("No se pudo determinar el día del servidor.");
+  }
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 async function refreshUrgentTask({ resultMessage = "" } = {}) {
   if (!settingsAreReady()) {
     agendaLoading = false;
     currentTask = null;
+    currentAgendaQuery = null;
     updateControls();
     setStatus("Configura el servidor y valida la conexión para consultar la agenda.", "offline-text");
     renderCardMessage("Conecta con el servidor desde Configuración para ver la tarea prioritaria.");
@@ -163,7 +190,10 @@ async function refreshUrgentTask({ resultMessage = "" } = {}) {
   setStatus(resultMessage ? `${resultMessage} Actualizando agenda…` : "Consultando agenda…", "online-text");
 
   try {
-    const reply = assertSuccessfulReply(await gatewayCall("GET_AGENDA"));
+    const rootReply = assertSuccessfulReply(await readGateway("root.read", null, {}));
+    if (!isCurrentAgendaRequest(requestRevision, requestSettingsRevision)) return;
+    const query = {day: currentCivilDay(rootReply.data?.timeZone), heuristic: POPUP_HEURISTIC};
+    const reply = assertSuccessfulReply(await gatewayCall("GET_AGENDA", query));
     if (!isCurrentAgendaRequest(requestRevision, requestSettingsRevision)) return;
 
     const agenda = reply.data;
@@ -173,6 +203,7 @@ async function refreshUrgentTask({ resultMessage = "" } = {}) {
       throw new Error("La respuesta de agenda no tiene el formato esperado.");
     }
     paintErrorBadge(null);
+    currentAgendaQuery = query;
     currentTask = urgentTasks[0] ?? null;
     needsRefreshBeforeAction = false;
     renderTask(currentTask);
@@ -182,6 +213,7 @@ async function refreshUrgentTask({ resultMessage = "" } = {}) {
     const detail = safeErrorMessage(error);
     paintErrorBadge(error);
     currentTask = null;
+    currentAgendaQuery = null;
     renderCardMessage(detail, "error-text");
     const refreshFailure = needsRefreshBeforeAction
       ? `No se pudo verificar la acción anterior. La agenda no se pudo actualizar: ${detail}`
@@ -199,11 +231,7 @@ async function refreshUrgentTask({ resultMessage = "" } = {}) {
 }
 
 function expectedTask(task) {
-  return {
-    id: task.id,
-    description: task.description,
-    context: task.context,
-  };
+  return { id: task.id };
 }
 
 function isCurrentAction(actionId, actionSettingsRevision) {
@@ -220,6 +248,8 @@ async function performTaskAction(operation) {
 
   const task = currentTask;
   const expectedTaskIdentity = expectedTask(task);
+  const agendaQuery = currentAgendaQuery;
+  if (!agendaQuery) return;
   const actionId = ++actionRevision;
   const actionSettingsRevision = settingsRevision;
   const label = operation === "POPUP_DONE" ? "Tarea completada." : "Tarea pospuesta 5 minutos.";
@@ -229,7 +259,9 @@ async function performTaskAction(operation) {
   setStatus(operation === "POPUP_DONE" ? "Completando tarea…" : "Posponiendo tarea 5 minutos…", "online-text");
 
   try {
-    const reply = await gatewayCall(operation, { expectedTask: expectedTaskIdentity });
+    const reply = await gatewayCall(operation, { expectedTask: expectedTaskIdentity, ...agendaQuery }, {
+      isCurrent: () => isCurrentAction(actionId, actionSettingsRevision),
+    });
     assertSuccessfulReply(reply);
     if (!isCurrentAction(actionId, actionSettingsRevision)) return;
     await refreshUrgentTask({ resultMessage: label });
@@ -257,6 +289,7 @@ function applySettings(settings) {
   activeAction = null;
   agendaLoading = false;
   currentTask = null;
+  currentAgendaQuery = null;
   needsRefreshBeforeAction = false;
   extensionState = { ...(extensionState ?? {}), settings };
   stateLoaded = true;
@@ -284,6 +317,19 @@ refreshButton.addEventListener("click", () => {
 });
 completeButton.addEventListener("click", () => void performTaskAction("POPUP_DONE"));
 snoozeButton.addEventListener("click", () => void performTaskAction("POPUP_SNOOZE"));
+
+subscribeChanges((changes) => {
+  if (!changes.collections.some(collection => collection === "tasks" || collection === "agenda")) return;
+  if (activeAction !== null) return;
+  void refreshUrgentTask({ resultMessage: "Hay cambios confirmados." });
+});
+
+window.addEventListener("focus", () => {
+  if (!agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
+});
 
 subscribeStorageChanges((changes) => {
   if (changes["settings.v1"]) applySettings(changes["settings.v1"].newValue);

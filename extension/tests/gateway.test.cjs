@@ -3,11 +3,34 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
-const { extensionRoot } = require("./helpers.cjs");
+const { bootBackground, extensionRoot, response } = require("./helpers.cjs");
+
+const BASE = "https://tasks.example.test/team/api/v1";
+const HOST_PERMISSION = "https://tasks.example.test/*";
+const settings = {
+  schemaVersion: 1,
+  serverUrl: BASE,
+  token: "test-bearer-token",
+  monitorEnabled: true,
+  timeoutMs: 30_000,
+};
 
 const firstUuid = "00000000-0000-4000-8000-000000000001";
 const secondUuid = "00000000-0000-4000-8000-000000000002";
 const laterUuid = "00000000-0000-4000-8000-000000000003";
+const operationUuid = "00000000-0000-4000-8000-000000000004";
+
+function rpc(operation, target = null, parameters = {}, requestId = firstUuid) {
+  return { protocolVersion: 1, requestId, operation, target, parameters };
+}
+
+function sender(env, page = "index.html") {
+  return { id: env.extensionId, url: env.namespace.runtime.getURL(page) };
+}
+
+function json(body, status = 200) {
+  return response(body, status, "application/json");
+}
 
 function deferred() {
   let resolve;
@@ -63,7 +86,16 @@ function loadMessages({ sendMessage, requestPermission } = {}) {
     crypto: { randomUUID: () => uuidValues[uuidIndex++] },
   });
   vm.runInContext(source, context, { filename: "js/messages.js", timeout: 2_000 });
-  return { ...context.__gatewayTest, calls, timeline, uuidCount: () => uuidIndex };
+  return {
+    ...context.__gatewayTest,
+    calls,
+    timeline,
+    uuidCount: () => uuidIndex,
+    vmObject(value) {
+      const serialized = JSON.stringify(value);
+      return vm.runInContext(`JSON.parse(${JSON.stringify(serialized)})`, context);
+    },
+  };
 }
 
 test("RPC v1 uses the exact envelope and independent UUIDs are allocated before sending a write", async () => {
@@ -259,8 +291,142 @@ test("retired manager commands fail locally instead of becoming command-style GE
   assert.equal(env.calls.length, 0);
 });
 
+test("a confirmed task operation publishes identity-based invalidations, including statistics for snooze", async () => {
+  const target = { kind: "task", id: "task-a" };
+  const env = bootBackground({
+    initialStorage: { "settings.v1": {
+      schemaVersion: 1,
+      serverUrl: "https://tasks.example.test/team/api/v1",
+      token: "test-token",
+      monitorEnabled: true,
+      timeoutMs: 30_000,
+    } },
+    initialPermissions: ["https://tasks.example.test/*"],
+    fetch: async (_url, init) => {
+      const intent = JSON.parse(init.body);
+      const receipt = {
+        id: intent.id,
+        status: "succeeded",
+        type: intent.type,
+        target: intent.target,
+        parameters: intent.parameters,
+        result: {
+          type: intent.type,
+          target: intent.target,
+          affectedIds: [target.id],
+          effectsState: "complete",
+          value: null,
+          _links: { affected: [] },
+        },
+        failure: null,
+      };
+      return json(receipt, 201);
+    },
+  });
+  const result = await env.send(rpc("operations.submit", target, {
+    id: operationUuid,
+    type: "snooze-task",
+    parameters: { duration: "5m" },
+  }), sender(env, "index.html"));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(env.runtimeMessages, [{
+    protocolVersion: 1,
+    event: "changes.invalidated",
+    changes: {
+      taskIds: ["task-a"],
+      projectNames: [],
+      eventNames: [],
+      collections: ["tasks", "agenda", "statistics", "events"],
+    },
+  }]);
+});
+
+test("a confirmed patch that removes an event invalidates the event collection even without a remaining event name", async () => {
+  const target = { kind: "task", id: "task-a" };
+  const env = bootBackground({
+    initialStorage: { "settings.v1": settings },
+    initialPermissions: [HOST_PERMISSION],
+    fetch: async () => json({
+      id: target.id,
+      description: "Task A",
+      context: "work",
+      status: "active",
+      raised: null,
+      waited: null,
+      actions: [],
+      _links: { self: { href: `${BASE}/tasks/task-a` } },
+    }),
+  });
+  const result = await env.send(rpc("tasks.patch", target, { raised: null }), sender(env, "index.html"));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(env.runtimeMessages, [{
+    protocolVersion: 1,
+    event: "changes.invalidated",
+    changes: {
+      taskIds: ["task-a"],
+      projectNames: [],
+      eventNames: [],
+      collections: ["tasks", "statistics", "agenda", "events"],
+    },
+  }]);
+});
+
+test("a popup action whose agenda read finishes after its local identity changed is not submitted", async () => {
+  let isCurrent = true;
+  const env = loadMessages({
+    sendMessage: (message) => {
+      isCurrent = false;
+      return Promise.resolve({
+        requestId: message.requestId,
+        ok: true,
+        status: 200,
+        data: { _embedded: { activeUrgentTasks: [{ id: "task-a" }] } },
+        error: null,
+      });
+    },
+  });
+
+  await assert.rejects(
+    env.gatewayCall("POPUP_DONE", env.vmObject({
+      expectedTask: { id: "task-a" },
+      day: "2026-10-05",
+      heuristic: "Remaining Effort(1)",
+    }), { isCurrent: () => isCurrent }),
+    (error) => error.kind === "invalid-request" && error.effectsState === "none",
+  );
+  assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].operation, "agenda.read");
+});
+
+test("a popup action is checked again immediately before submit dispatch", async () => {
+  let checks = 0;
+  const env = loadMessages({
+    sendMessage: (message) => Promise.resolve({
+      requestId: message.requestId,
+      ok: true,
+      status: 200,
+      data: { _embedded: { activeUrgentTasks: [{ id: "task-a" }] } },
+      error: null,
+    }),
+  });
+
+  await assert.rejects(
+    env.gatewayCall("POPUP_SNOOZE", env.vmObject({
+      expectedTask: { id: "task-a" },
+      day: "2026-10-05",
+      heuristic: "Remaining Effort(1)",
+    }), { isCurrent: () => ++checks === 1 }),
+    (error) => error.kind === "invalid-request" && error.effectsState === "none",
+  );
+  assert.equal(checks, 2);
+  assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].operation, "agenda.read");
+});
+
 test("popup legacy actions preflight the current urgent identity and submit one typed operation", async (t) => {
-  const expectedTask = { id: "task/ü", description: "Pay invoice", context: "home" };
+  const expectedTask = { id: "task/ü" };
   const scenarios = [
     { operation: "POPUP_DONE", type: "complete-task", parameters: {} },
     { operation: "POPUP_SNOOZE", type: "snooze-task", parameters: { duration: "5m" } },
@@ -282,7 +448,11 @@ test("popup legacy actions preflight the current urgent identity and submit one 
           error: null,
         }),
       });
-      const reply = await env.gatewayCall(scenario.operation, { expectedTask });
+      const reply = await env.gatewayCall(scenario.operation, env.vmObject({
+        expectedTask,
+        day: "2026-10-05",
+        heuristic: "Remaining Effort(1)",
+      }), { isCurrent: () => true });
 
       assert.equal(reply.ok, true);
       assert.equal(env.calls.length, 2);
@@ -298,18 +468,22 @@ test("popup legacy actions preflight the current urgent identity and submit one 
 });
 
 test("popup action stops before submit when the urgent task identity is stale", async () => {
-  const expectedTask = { id: "task-1", description: "Pay invoice", context: "home" };
+  const expectedTask = { id: "task-1" };
   const env = loadMessages({
     sendMessage: (message) => Promise.resolve({
       requestId: message.requestId,
       ok: true,
       status: 200,
-      data: { _embedded: { activeUrgentTasks: [{ ...expectedTask, description: "Changed" }] } },
+      data: { _embedded: { activeUrgentTasks: [{ id: "task-2" }] } },
       error: null,
     }),
   });
 
-  await assert.rejects(env.gatewayCall("POPUP_DONE", { expectedTask }), (error) => error.kind === "task-changed");
+  await assert.rejects(env.gatewayCall("POPUP_DONE", env.vmObject({
+    expectedTask,
+    day: "2026-10-05",
+    heuristic: "Remaining Effort(1)",
+  }), { isCurrent: () => true }), (error) => error.kind === "task-changed");
   assert.deepEqual(env.calls.map((call) => call.operation), ["agenda.read"]);
 });
 

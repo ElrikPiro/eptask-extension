@@ -24,9 +24,10 @@ globalThis.__popupTest = {
 
 const readySettings = (overrides = {}) => ({
   schemaVersion: 1,
-  serverUrl: "http://tasks.example.test/api",
+  serverUrl: "https://tasks.example.test/api/v1",
   token: "test-token",
   monitorEnabled: true,
+  timeoutMs: 30_000,
   ...overrides,
 });
 
@@ -35,14 +36,15 @@ function task(id, description = `Task ${id}`, context = "work") {
     id,
     description,
     context,
-    due: "2026-10-02",
-    status: "pending",
-    total_cost: 1.25,
+    due: "2026-10-05",
+    status: "active",
+    totalCost: { value: "2", unit: "pomodoro" },
+    investedEffort: { value: "1", unit: "pomodoro" },
   };
 }
 
-function success(data) {
-  return { ok: true, data };
+function success(data, status = 200) {
+  return { requestId: "fixture-request", ok: true, status, data, error: null };
 }
 
 function deferred() {
@@ -108,7 +110,7 @@ class FakeElement {
   }
 }
 
-function bootPopup({ initialSettings = readySettings(), respond } = {}) {
+function bootPopup({ initialSettings = readySettings(), respond, serverTimeZone = "Europe/Madrid" } = {}) {
   const selectors = [
     "#popup-status", "#urgent-task", "#open-options", "#open-manager",
     "#refresh-agenda", "#complete-task", "#snooze-task", "#popup-error-badge",
@@ -120,6 +122,7 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
 
   const calls = [];
   let storageListener = null;
+  let changeListener = null;
   const statePromise = Promise.resolve({ settings: initialSettings, history: [], monitorStatus: null });
   const document = {
     querySelector(selector) {
@@ -130,6 +133,7 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
     createElement(tagName) {
       return new FakeElement(tagName);
     },
+    addEventListener() {},
   };
   const node = (tagName, text = "", className = "") => {
     const element = document.createElement(tagName);
@@ -139,10 +143,12 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
   };
   const sandbox = {
     document,
+    window: { addEventListener() {} },
     Error,
     Promise,
     browserApi: {
       runtime: {
+        id: "popup-test-extension",
         openOptionsPage: async () => undefined,
         getURL: (relativePath) => `moz-extension://test/${relativePath}`,
       },
@@ -152,13 +158,29 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
       calls.push({ operation, args });
       if (respond) return respond(operation, args, calls);
       if (operation === "GET_AGENDA") return Promise.resolve(success({ active_urgent_tasks: [task("task-1")] }));
-      return Promise.resolve(success({ message: "ok" }));
+      return Promise.resolve(success({ id: "operation-id", status: "succeeded", result: { effectsState: "complete", affectedIds: [] }, failure: null }, 201));
+    },
+    readGateway(operation, target = null, parameters = {}) {
+      calls.push({ operation, target, parameters });
+      if (operation === "root.read") return Promise.resolve(success({ timeZone: serverTimeZone }));
+      if (respond) {
+        const response = respond(operation, { target, parameters }, calls);
+        if (response !== undefined) return response;
+      }
+      return Promise.resolve(success({}));
+    },
+    subscribeChanges(listener) {
+      changeListener = listener;
+      return () => { changeListener = null; };
     },
     assertSuccessfulReply(reply) {
       if (reply?.ok === true) return reply;
       const error = new Error(reply?.error?.message || "La operación no se pudo completar.");
       error.kind = typeof reply?.error?.kind === "string" ? reply.error.kind : "gateway-unavailable";
       error.status = Number.isInteger(reply?.status) ? reply.status : null;
+      error.operationId = reply?.error?.operationId;
+      error.effectsState = reply?.error?.effectsState;
+      error.requestId = reply?.requestId;
       throw error;
     },
     isReady(settings) {
@@ -185,6 +207,9 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
     changeSettings(settings) {
       storageListener({ "settings.v1": { newValue: settings } });
     },
+    invalidate(changes = { taskIds: [], projectNames: [], eventNames: [], collections: ["tasks", "agenda"] }) {
+      changeListener?.(changes);
+    },
     async flush() {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -208,8 +233,8 @@ test("popup loads the first urgent agenda task and enables its accessible action
       : Promise.resolve(success({})),
   });
 
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial agenda");
-  assert.deepEqual(env.calls.map(({ operation }) => operation), ["GET_AGENDA"]);
+  await waitFor(() => env.calls.some((call) => call.operation === "GET_AGENDA") && !env.state().agendaLoading, "initial agenda");
+  assert.deepEqual(env.calls.map(({ operation }) => operation), ["root.read", "GET_AGENDA"]);
   assert.match(env.elements.get("#urgent-task").textContent, /Pay invoice/);
   assert.equal(env.elements.get("#complete-task").disabled, false);
   assert.equal(env.elements.get("#snooze-task").disabled, false);
@@ -227,8 +252,8 @@ test("popup maps a HAL agenda resource into the displayed task without exposing 
             context: "work",
             due: "2026-10-05",
             status: "active",
-            totalCost: { value: "5", unit: "pomodoro" },
-            investedEffort: { value: "2", unit: "pomodoro" },
+            totalCost: { value: "2", unit: "pomodoro" },
+            investedEffort: { value: "1", unit: "pomodoro" },
             _links: { self: { href: "https://api.example.test/api/v1/tasks/task%2F%C3%A4" } },
           }],
         },
@@ -243,10 +268,47 @@ test("popup maps a HAL agenda resource into the displayed task without exposing 
     context: "work",
     due: "2026-10-05",
     status: "active",
-    total_cost: 3,
+    total_cost: "2",
   });
   assert.doesNotMatch(env.elements.get("#urgent-task").textContent, /https:\/\//);
-  assert.match(env.elements.get("#urgent-task").textContent, /3\.00p/);
+  assert.match(env.elements.get("#urgent-task").textContent, /2p/);
+});
+
+test("popup preserves negative backend remaining effort without subtracting invested work", async () => {
+  const env = bootPopup({
+    respond: (operation) => operation === "GET_AGENDA"
+      ? Promise.resolve(success({
+        _embedded: {
+          activeUrgentTasks: [{
+            id: "negative-cost",
+            description: "Review balance",
+            context: "work",
+            totalCost: { value: "-0.5", unit: "pomodoro" },
+            investedEffort: { value: "9", unit: "pomodoro" },
+          }],
+        },
+      }))
+      : undefined,
+  });
+
+  await waitFor(() => env.calls.some((call) => call.operation === "GET_AGENDA") && !env.state().agendaLoading, "negative effort display");
+  assert.deepEqual(JSON.parse(JSON.stringify(env.state().task)), {
+    id: "negative-cost",
+    description: "Review balance",
+    context: "work",
+    total_cost: "-0.5",
+  });
+  assert.match(env.elements.get("#urgent-task").textContent, /-0\.5p/);
+});
+
+test("an invalid server timezone prevents a guessed agenda query", async () => {
+  const env = bootPopup({ serverTimeZone: "Invalid/Zone" });
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "timezone failure");
+
+  assert.equal(env.calls.filter((call) => call.operation === "GET_AGENDA").length, 0);
+  assert.match(env.elements.get("#urgent-task").textContent, /zona horaria|respuesta no válida/i);
+  assert.equal(env.elements.get("#complete-task").disabled, true);
+  assert.equal(env.elements.get("#snooze-task").disabled, true);
 });
 
 test("actions stay disabled without a connection or when the agenda has no urgent task", async () => {
@@ -267,7 +329,7 @@ test("actions stay disabled without a connection or when the agenda has no urgen
   assert.equal(env.elements.get("#refresh-agenda").disabled, false);
   assert.match(env.elements.get("#popup-status").textContent, /Actualiza la agenda/);
   env.elements.get("#refresh-agenda").click();
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "empty agenda");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1 && !env.state().agendaLoading, "empty agenda");
   assert.match(env.elements.get("#urgent-task").textContent, /No hay tareas urgentes activas/);
   assert.equal(env.elements.get("#refresh-agenda").disabled, false);
   assert.equal(env.elements.get("#complete-task").disabled, true);
@@ -288,7 +350,7 @@ test("complete and snooze send the displayed identity once and refresh the agend
       return Promise.resolve(success({}));
     },
   });
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "first agenda");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1 && !env.state().agendaLoading, "first agenda");
 
   env.elements.get("#complete-task").click();
   env.elements.get("#complete-task").click();
@@ -296,10 +358,10 @@ test("complete and snooze send the displayed identity once and refresh the agend
   assert.equal(env.elements.get("#complete-task").disabled, true);
   assert.equal(env.elements.get("#snooze-task").disabled, true);
   assert.equal(env.calls.filter((call) => call.operation === "POPUP_DONE").length, 1);
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(env.calls.find((call) => call.operation === "POPUP_DONE").args)),
-    { expectedTask: { id: "uid-1", description: "Prepare report", context: "office" } },
-  );
+  const completeArgs = env.calls.find((call) => call.operation === "POPUP_DONE").args;
+  assert.deepEqual(JSON.parse(JSON.stringify(completeArgs.expectedTask)), { id: "uid-1" });
+  assert.match(completeArgs.day, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(completeArgs.heuristic, "Remaining Effort(1)");
 
   actionResponse.resolve(success({ message: "completed" }));
   await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 2, "agenda refresh after completion");
@@ -311,10 +373,10 @@ test("complete and snooze send the displayed identity once and refresh the agend
   await waitFor(() => env.calls.some((call) => call.operation === "POPUP_SNOOZE"), "snooze action");
   await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 3, "agenda refresh after snooze");
   await waitFor(() => !env.state().agendaLoading && !env.state().activeAction, "snooze refresh");
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(env.calls.find((call) => call.operation === "POPUP_SNOOZE").args)),
-    { expectedTask: { id: "uid-2", description: "Call customer", context: "phone" } },
-  );
+  const snoozeArgs = env.calls.find((call) => call.operation === "POPUP_SNOOZE").args;
+  assert.deepEqual(JSON.parse(JSON.stringify(snoozeArgs.expectedTask)), { id: "uid-2" });
+  assert.match(snoozeArgs.day, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(snoozeArgs.heuristic, "Remaining Effort(1)");
   assert.equal(env.calls.filter((call) => call.operation === "POPUP_SNOOZE").length, 1);
   assert.match(env.elements.get("#popup-status").textContent, /Tarea pospuesta 5 minutos\. Agenda actualizada\./);
 });
@@ -327,7 +389,7 @@ test("an action error stays uncertain and requires a successful manual agenda re
       return Promise.resolve({ ok: false, status: null, error: { kind: "uncertain", message: "Respuesta perdida" } });
     },
   });
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial task");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1 && !env.state().agendaLoading, "initial task");
 
   env.elements.get("#complete-task").click();
   await waitFor(() => !env.state().activeAction, "failed action handling");
@@ -359,7 +421,7 @@ test("a successful mutation remains confirmed when the following agenda refresh 
       return Promise.resolve(success({ message: "done" }));
     },
   });
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial agenda");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1 && !env.state().agendaLoading, "initial agenda");
   env.elements.get("#complete-task").click();
   await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 2, "failed post-action agenda refresh");
   await waitFor(() => !env.state().agendaLoading && !env.state().activeAction, "post-action refresh failure handling");
@@ -383,7 +445,7 @@ test("a failed mutation stays unverified when the manual refresh also fails", as
       return Promise.resolve({ ok: false, status: null, error: { kind: "uncertain", message: "Respuesta perdida" } });
     },
   });
-  await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial task");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1 && !env.state().agendaLoading, "initial task");
 
   env.elements.get("#complete-task").click();
   await waitFor(() => !env.state().activeAction, "uncertain action result");
@@ -407,8 +469,8 @@ test("a late agenda reply from an old connection cannot restore stale task data"
       return count === 1 ? oldReply.promise : newReply.promise;
     },
   });
-  await waitFor(() => env.calls.length === 1, "old connection agenda request");
-  env.changeSettings(readySettings({ serverUrl: "http://new-server.example.test/api" }));
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1, "old connection agenda request");
+  env.changeSettings(readySettings({ serverUrl: "https://new-server.example.test/api/v1" }));
   assert.equal(env.calls.filter((call) => call.operation === "GET_AGENDA").length, 1, "storage changes do not fetch");
   assert.equal(env.elements.get("#refresh-agenda").disabled, false);
   assert.equal(env.elements.get("#complete-task").disabled, true);
@@ -439,7 +501,7 @@ test("disconnect invalidates pending agenda and mutation replies", async () => {
       return actionReply.promise;
     },
   });
-  await waitFor(() => env.calls.length === 1, "pending initial agenda");
+  await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 1, "pending initial agenda");
   env.changeSettings({ ...readySettings(), monitorEnabled: false });
   agendaReply.resolve(success({ active_urgent_tasks: [task("uid-stale", "Stale task")] }));
   await env.flush();

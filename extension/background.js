@@ -130,6 +130,15 @@
     if (typeof value !== 'string' || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) fail('invalid-request');
     return value;
   }
+  function domainText(value, max = 20000) {
+    if (typeof value !== 'string' || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value)) fail('invalid-request');
+    return value;
+  }
+  function nonEmptyDomainText(value, max = 20000) {
+    domainText(value, max);
+    if (!value.trim()) fail('invalid-request');
+    return value;
+  }
   function isUuid(value) { return typeof value === 'string' && UUID.test(value); }
   function validateId(value) {
     nonEmptyText(value, 4096);
@@ -300,6 +309,15 @@
   }
 
   function validOperationReceipt(receipt, options) {
+    const affectedIds = receipt && receipt.result && receipt.result.affectedIds;
+    const affectedIdsValid = Array.isArray(affectedIds) &&
+      affectedIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(id)) &&
+      new Set(affectedIds).size === affectedIds.length;
+    const targetAffected = options.expectedTarget.kind === 'task' || options.expectedTarget.kind === 'project'
+      ? affectedIdsValid && affectedIds.includes(options.expectedTarget.id)
+      : options.expectedOperationType === 'create-task'
+        ? affectedIdsValid && affectedIds.length > 0
+        : options.expectedOperationType === 'raise-event' && affectedIdsValid;
     return isObject(receipt) &&
       receipt.id === options.expectedOperationId &&
       receipt.status === 'succeeded' &&
@@ -308,11 +326,113 @@
       isObject(receipt.result) &&
       receipt.result.type === options.expectedOperationType &&
       receiptMatchesTarget(receipt.result.target, options.expectedTarget) &&
+      receipt.result.effectsState === 'complete' &&
+      affectedIdsValid && targetAffected &&
       receipt.failure === null;
   }
 
+  function collectTaskEventNames(value, eventNames) {
+    if (Array.isArray(value)) {
+      value.forEach(item => collectTaskEventNames(item, eventNames));
+      return;
+    }
+    if (!isObject(value)) return;
+    for (const key of ['raised', 'waited']) {
+      const eventName = value[key];
+      if (typeof eventName === 'string' && eventName.trim()) eventNames.add(eventName);
+    }
+  }
+
+  function confirmedOperationChanges(receipt) {
+    if (!isObject(receipt) || receipt.status !== 'succeeded' || receipt.failure !== null ||
+        !isObject(receipt.result) || receipt.result.effectsState !== 'complete' ||
+        !Array.isArray(receipt.result.affectedIds) ||
+        receipt.result.affectedIds.some(id => typeof id !== 'string' || !id || id.length > 4096 || /[\u0000-\u001f\u007f]/.test(id))) return null;
+
+    const taskIds = new Set();
+    const projectNames = new Set();
+    const eventNames = new Set();
+    const collections = new Set();
+    const affectedIds = receipt.result.affectedIds;
+
+    switch (receipt.type) {
+      case 'create-task':
+      case 'edit-task':
+      case 'complete-task':
+      case 'schedule-task':
+      case 'record-work':
+      case 'snooze-task':
+      case 'raise-event':
+        affectedIds.forEach(id => taskIds.add(id));
+        collections.add('tasks');
+        collections.add('agenda');
+        collections.add('statistics');
+        collections.add('events');
+        break;
+      case 'open-project':
+      case 'close-project':
+      case 'hold-project':
+      case 'edit-project-content':
+        affectedIds.forEach(id => projectNames.add(id));
+        collections.add('projects');
+        break;
+      default:
+        return null;
+    }
+
+    if (receipt.type === 'raise-event') {
+      if (typeof receipt.target?.id !== 'string' || !receipt.target.id.trim()) return null;
+      eventNames.add(receipt.target.id);
+      collections.add('events');
+    }
+    if (receipt.type === 'edit-task') {
+      const changes = receipt.parameters?.changes;
+      if (isObject(changes) && (Object.hasOwn(changes, 'raised') || Object.hasOwn(changes, 'waited'))) {
+        collectTaskEventNames(changes, eventNames);
+      }
+    }
+    if (receipt.type === 'complete-task' || receipt.type === 'schedule-task') {
+      collectTaskEventNames(receipt.result.value, eventNames);
+    }
+
+    return {
+      taskIds: [...taskIds],
+      projectNames: [...projectNames],
+      eventNames: [...eventNames],
+      collections: [...collections],
+    };
+  }
+
+  function confirmedPatchedTaskChanges(taskId, patch, task) {
+    if (typeof taskId !== 'string' || !isObject(task) || task.id !== taskId) return null;
+    const eventNames = new Set();
+    if (isObject(patch) && (Object.hasOwn(patch, 'raised') || Object.hasOwn(patch, 'waited'))) {
+      collectTaskEventNames(task, eventNames);
+    }
+    const collections = ['tasks', 'statistics', 'agenda', 'events'];
+    return {taskIds: [taskId], projectNames: [], eventNames: [...eventNames], collections};
+  }
+
+  async function broadcastChanges(changes) {
+    if (!changes || !native.runtime || typeof native.runtime.sendMessage !== 'function') return;
+    const message = {protocolVersion: PROTOCOL_VERSION, event: 'changes.invalidated', changes};
+    await callApi(native.runtime, 'sendMessage', message).catch(() => {});
+  }
+
   async function fetchResource(settings, destination, options = {}) {
+    if (options.configurationRevision !== undefined && options.configurationRevision !== configurationRevision) {
+      fail('invalid-request', 'La configuración cambió antes de enviar la solicitud.', {
+        operationId: options.operationId,
+        effectsState: options.modifying ? 'none' : null,
+      });
+    }
     await hasHostPermission(settings);
+    if (options.configurationRevision !== undefined && options.configurationRevision !== configurationRevision) {
+      fail('invalid-request', 'La configuración cambió antes de enviar la solicitud.', {
+        operationId: options.operationId,
+        effectsState: options.modifying ? 'none' : null,
+      });
+    }
     const url = validateDestination(settings, destination, options.allowQuery === true);
     const headers = {Accept: 'application/hal+json, application/problem+json'};
     if (options.body !== undefined) headers['Content-Type'] = options.contentType || 'application/json';
@@ -427,7 +547,8 @@
     exactKeys(patch, Array.from(PATCH_FIELDS));
     for (const [key, value] of Object.entries(patch)) {
       if (value === null && !['raised', 'waited'].includes(key)) fail('invalid-request');
-      if (['description', 'context', 'start', 'due', 'raised', 'waited'].includes(key) && value !== null) optionalText(value, 20000);
+      if (key === 'description' && value !== null) nonEmptyDomainText(value, 20000);
+      if (['context', 'start', 'due', 'raised', 'waited'].includes(key) && value !== null) optionalText(value, 20000);
       if (key === 'severity' && (typeof value !== 'number' || !Number.isFinite(value))) fail('invalid-request');
       if (key === 'calm' && typeof value !== 'boolean') fail('invalid-request');
       if (key === 'totalCost') validatePomodoro(value);
@@ -476,7 +597,7 @@
     exactKeys(params, specs[type]);
     switch (type) {
       case 'create-task':
-        nonEmptyText(params.description);
+        nonEmptyDomainText(params.description);
         if (params.context !== undefined) optionalText(params.context);
         if (params.totalCost !== undefined) validatePomodoro(params.totalCost);
         if ((params.context === undefined) !== (params.totalCost === undefined)) fail('invalid-request');
@@ -493,10 +614,23 @@
         optionalText(params.duration);
         break;
       case 'snooze-task': if (params.duration !== undefined) optionalText(params.duration); break;
-      case 'open-project': if (params.description !== undefined) nonEmptyText(params.description); break;
+      case 'open-project': if (params.description !== undefined) domainText(params.description); break;
       case 'edit-project-content':
-        for (const key of ['action', 'content', 'description']) if (params[key] !== undefined) optionalText(params[key]);
-        for (const key of ['line', 'position']) if (params[key] !== undefined && (!Number.isSafeInteger(params[key]) || params[key] < 0)) fail('invalid-request');
+        if (Object.hasOwn(params, 'description')) {
+          exactKeys(params, ['description'], ['description']);
+          domainText(params.description);
+          break;
+        }
+        if (!['replace', 'insert', 'delete'].includes(params.action) ||
+            Object.hasOwn(params, 'line') === Object.hasOwn(params, 'position')) fail('invalid-request');
+        const line = Object.hasOwn(params, 'line') ? params.line : params.position;
+        if (!Number.isSafeInteger(line) || line < 1) fail('invalid-request');
+        if (params.action === 'delete') {
+          exactKeys(params, ['action', 'line', 'position'], ['action']);
+        } else {
+          exactKeys(params, ['action', 'line', 'position', 'content'], ['action', 'content']);
+          domainText(params.content);
+        }
         break;
       default: break;
     }
@@ -530,7 +664,7 @@
     if (op.startsWith('settings.') || op === 'history.clear') {
       if (page !== 'options.html') fail('unauthorized-sender');
     } else if (page === 'options.html') fail('unauthorized-sender');
-    if (page === 'popup.html' && !['agenda.read', 'operations.submit'].includes(op)) fail('unauthorized-sender');
+    if (page === 'popup.html' && !['root.read', 'agenda.read', 'operations.submit'].includes(op)) fail('unauthorized-sender');
     return page;
   }
 
@@ -586,7 +720,7 @@
     if (!candidate.monitorEnabled) fail('invalid-request');
     await disarmExisting();
     await hasHostPermission(candidate);
-    const probed = await fetchResource(candidate, baseUrl(candidate));
+    const probed = await fetchResource(candidate, baseUrl(candidate), {configurationRevision: revision});
     if (!isObject(probed.data) || !isObject(probed.data._links) || !isObject(probed.data._links.self)) fail('invalid-response', undefined, {status: probed.status});
     const self = validateDestination(candidate, probed.data._links.self.href, false);
     if (self.href.replace(/\/$/, '') !== baseUrl(candidate)) fail('invalid-response', undefined, {status: probed.status});
@@ -645,7 +779,15 @@
       if (op === 'root.read') exactKeys(params, []);
       const settings = await readStoredSettings(true);
       const route = routeFor(settings, op, message.target, params, message.requestId, page);
-      const result = await fetchResource(settings, route.url, route.options);
+      const result = await fetchResource(settings, route.url, {...route.options, configurationRevision: revision});
+      if (op === 'operations.submit') {
+        if (revision === configurationRevision) await broadcastChanges(confirmedOperationChanges(result.data));
+      } else if (op === 'tasks.patch') {
+        const taskId = message.target && message.target.id;
+        const changes = confirmedPatchedTaskChanges(taskId, params, result.data);
+        if (!changes) fail('uncertain', undefined, {status: result.status, effectsState: 'unknown'});
+        if (revision === configurationRevision) await broadcastChanges(changes);
+      }
       if (revision === configurationRevision) {
         if (op === 'agenda.read') await updateUrgencyFromAgenda(result.data, settings, revision);
         if (revision === configurationRevision) await clearStoredError(revision).catch(() => {});
@@ -774,6 +916,8 @@
   }
 
   native.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Invalidation broadcasts are notifications, never RPC requests or replies.
+    if (isObject(message) && message.protocolVersion === PROTOCOL_VERSION && message.event === 'changes.invalidated') return false;
     void dispatchMessage(message, sender, sendResponse);
     return true;
   });

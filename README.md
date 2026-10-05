@@ -22,9 +22,17 @@ La conexión comprueba que el servidor responde con el recurso HAL raíz esperad
 
 ## Popup e indicador
 
-El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de comprobar que su identidad sigue coincidiendo con la agenda actual. El indicador de fondo consulta `/agenda` con una alarma de cinco minutos; no lee ni consume notificaciones. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
+El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de volver a consultar la agenda y comprobar el ID mostrado. Si cambia la conexión mientras esa consulta está en curso, no envía la operación al nuevo destino. El indicador de fondo consulta `/agenda` con una alarma de cinco minutos; no lee ni consume el historial de notificaciones. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
 
-Los IDs declarados (`id` en JSON o `[id:: …]` en Markdown) se mantienen. Si falta uno, el backend calcula un respaldo MD5 a partir de la descripción, la ruta del archivo y la posición física; la primera escritura lo fija. Un ID duplicado impide identificar el recurso de forma única. Por eso el popup vuelve a contrastar la identidad mostrada con la agenda antes de enviar una acción. Los IDs `.` y `..` se rechazan antes de cualquier petición porque podrían cambiar el destino al usarse como segmentos de ruta. El gestor completo aún no está adaptado a esta API: los comandos antiguos se rechazan sin enviar peticiones. El monitor antiguo de avisos permanece inerte y no elimina el historial guardado localmente.
+## Gestor
+
+La página principal carga tareas, agenda, estadísticas, eventos, estrategias y proyectos mediante lecturas HAL autenticadas. Cada instancia del gestor mantiene sus propios filtros, búsqueda, paginación, algoritmo, heurística, selección y formularios; una vista no cambia las consultas de otra instancia. La selección de una tarea desde la agenda pide su detalle por ID incluso si no aparece en la página actual. Un ID ausente o ambiguo produce un error visible y no selecciona otra fila.
+
+Las acciones y sus campos proceden de las capacidades anunciadas por cada recurso. Las ediciones de una tarea combinan cambios de propiedades y esfuerzo en una sola operación. Los campos de identidad, estado y esfuerzo derivado no se envían como cambios. Abrir otro recurso, actualizar datos, recibir una invalidación o volver a la página no cambia el destino ni descarta un borrador; se puede cargar la versión remota conservando el borrador o descartarlo de forma explícita. Las mutaciones confirmadas actualizan las vistas con sus propios parámetros. Los resultados inciertos no se reenvían automáticamente.
+
+El coste restante mostrado es el valor `totalCost` recibido del servidor. La interfaz no vuelve a descontar el trabajo registrado ni altera cantidades recibidas.
+
+Los IDs declarados (`id` en JSON o `[id:: …]` en Markdown) se mantienen. Si falta uno, el backend calcula un respaldo MD5 a partir de la descripción, la ruta del archivo y la posición física; la primera escritura lo fija. Un ID duplicado impide identificar el recurso de forma única. La extensión conserva los IDs opacos recibidos, salvo `.` y `..`, que se rechazan antes de una petición porque podrían cambiar el destino al usarse como segmentos de ruta. Los mensajes antiguos de comando se rechazan sin contactar con el servidor.
 
 ## Pruebas locales
 
@@ -34,4 +42,4 @@ Con Node.js 20 o posterior, ejecuta desde `extension/`:
 node --test tests/*.test.cjs
 ```
 
-La suite verifica el contrato de mensajes, el control de permisos, la validación de destinos HTTPS, los errores y las respuestas inciertas mediante dobles locales. También realiza una prueba de loopback con un certificado de prueba temporal para comprobar TLS, una identidad de servidor incorrecta y el rechazo de redirecciones a HTTP. Esa prueba no configura certificados del sistema ni sustituye las pruebas de permisos y confianza en los navegadores.
+La suite verifica el contrato de mensajes, el control de permisos, la validación de destinos HTTPS, la agenda del popup y el gestor en documentos aislados con un DOM de prueba. Incluye formularios, operaciones, consultas explícitas, borradores y lecturas que terminan fuera de orden. También realiza una prueba de loopback con un certificado temporal para comprobar TLS, una identidad de servidor incorrecta y el rechazo de redirecciones a HTTP. No configura certificados del sistema ni sustituye las pruebas con ventanas y perfiles reales de Firefox y Chromium; los permisos y la confianza TLS nativos siguen pendientes de esa comprobación.

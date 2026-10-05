@@ -41,8 +41,8 @@ function operationReceipt(id, type, target, status = "succeeded") {
     result: status === "succeeded" ? {
       type,
       target,
-      affectedIds: [],
-      effectsState: "none",
+      affectedIds: typeof target?.id === "string" ? [target.id] : [],
+      effectsState: "complete",
       value: null,
       _links: { affected: [] },
     } : null,
