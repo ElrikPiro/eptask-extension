@@ -2,43 +2,29 @@
 
 La extensión vive en `extension/` y usa HTML, CSS y JavaScript nativos. No comparte el runtime del frontend React y no requiere instalación de paquetes ni compilación. El manifiesto activo es `extension/manifest.json`; las variantes fuente `manifest.chromium.json` y `manifest.firefox.json` se copian manualmente antes de cargarla.
 
-**Estado:** prototipo. Compatibilidad validada en **Firefox 140.13.0esr y Chromium 150+**; no se afirma compatibilidad con versiones anteriores.
+## Cargar la extensión
 
-## Cargar en Chromium
+En Chromium, copia `manifest.chromium.json` sobre `manifest.json`, abre `chrome://extensions` o `edge://extensions`, activa el modo de desarrollador y elige **Cargar descomprimida**. Selecciona la carpeta `extension/`.
 
-1. Entra en `extension/` y copia `manifest.chromium.json` sobre `manifest.json`.
-2. Abre `chrome://extensions` (o `edge://extensions`), activa el modo de desarrollador y elige **Cargar descomprimida**.
-3. Selecciona la carpeta `extension/`.
+En Firefox, copia `manifest.firefox.json` sobre `manifest.json`, abre `about:debugging#/runtime/this-firefox`, elige **Cargar complemento temporal…** y selecciona `extension/manifest.json`. El complemento temporal se conserva hasta cerrar Firefox; después hay que cargarlo de nuevo.
 
-## Cargar en Firefox
+Al cambiar de navegador, copia la variante correspondiente al `manifest.json` antes de cargar o recargar la carpeta. Chromium usa un service worker y Firefox scripts de background. La suite automatizada cubre las APIs con dobles locales y Node; todavía no valida en una instalación nativa de Firefox o Chromium los diálogos de permisos ni sus almacenes de certificados.
 
-1. Entra en `extension/` y copia `manifest.firefox.json` sobre `manifest.json`.
-2. Abre `about:debugging#/runtime/this-firefox`, elige **Cargar complemento temporal…** y selecciona `extension/manifest.json`.
-3. El complemento temporal se conserva hasta cerrar Firefox; después hay que cargarlo de nuevo.
+## Conexión segura
 
-Al cambiar de navegador, copia la variante correspondiente al `manifest.json` raíz antes de cargar o recargar la carpeta. Las dos fuentes declaran MV3 y apuntan al mismo código local; Chromium usa un service worker y Firefox scripts de background.
+En **Configuración**, introduce una dirección HTTPS del servidor, un token Bearer y un tiempo de espera. La extensión normaliza la ruta para usar `/api/v1`. Rechaza direcciones HTTP, credenciales en la URL, consultas, fragmentos, segmentos codificados que cambien la ruta y prefijos duplicados.
 
-## Transporte
+Al elegir **Probar y conectar**, el navegador solicita permiso para acceder al host HTTPS configurado. El permiso se pide desde esa acción del usuario y se comprueba antes de cada solicitud. Si se deniega o se revoca, la conexión queda desactivada. El background es el único componente que realiza peticiones; envía el token como `Authorization: Bearer` solo al origen y a la ruta API validados. Las solicitudes omiten credenciales del navegador, no siguen redirecciones y no se guardan en caché.
 
-El soporte HTTPS está pendiente de implementación.
+El token se conserva en el almacenamiento local de la extensión. Los errores remotos se reducen a mensajes seguros antes de guardarlos o mostrarlos; los datos de recursos, como IDs y enlaces HAL, se mantienen intactos para no cambiar su identidad.
 
-## Configuración
+La conexión comprueba que el servidor responde con el recurso HAL raíz esperado. Las lecturas y mutaciones usan operaciones tipadas de la API. Si se pierde la respuesta de una mutación, la interfaz la marca como incierta y no la reenvía automáticamente.
 
-La página **Configuración** contiene el endpoint, el token Bearer y la acción **Probar y conectar**. La prueba consulta `/agenda`; solo cuando la respuesta tiene la estructura esperada queda habilitado el monitor.
+## Popup e indicador
 
-El popup muestra la primera tarea de `active_urgent_tasks` y el gestor abre en una pestaña nueva. El monitor funciona en background con una alarma nominal de cinco minutos. Las páginas leen la configuración y el historial local de la extensión; abrirlas no consume la cola del backend.
+El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de comprobar que su identidad sigue coincidiendo con la agenda actual. El indicador de fondo consulta `/agenda` con una alarma de cinco minutos; no lee ni consume notificaciones. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
 
-## Indicador y acciones rápidas
-
-Compatibilidad validada en Firefox 140.13.0esr y Chromium 150+.
-
-La extensión muestra un badge de acción con un punto textual cuando una lectura válida de `/agenda` encuentra urgentes activas y permite completar o posponer cinco minutos la primera urgente mostrada desde el popup. Se intenta mostrar el punto rojo sobre fondo transparente con las APIs nativas de color del badge; si el navegador no admite ese ajuste o lo rechaza, se usa fondo rojo. El indicador se consulta con una alarma independiente de cinco minutos; esa lectura usa `/agenda` y nunca consume `/notifications`, por lo que el monitor de notificaciones mantiene su propio ciclo. La conexión, una lectura del popup, una acción y la desconexión también actualizan o limpian el indicador. Los mocks validan colores y fallback; la apariencia se ha validado en Firefox 140.13.0esr y Chromium 150+.
-
-Las acciones envían la identidad mostrada (`id`, `description` y `context`) al background. Este vuelve a leer la agenda y recorre el listado paginado dentro de un grupo FIFO para localizar la fila coincidente antes de seleccionar y mutar. También exige que la respuesta de selección coincida en descripción y contexto aunque el ID sea conocido; el backend puede reenumerar IDs JSON y compartir la selección con otros clientes. Si la tarea cambió, no está en el listado vigente o no se puede identificar de forma única, la acción se rechaza sin mutar; si los filtros del gestor ocultan esa urgente, vuelve al gestor y actualiza o ajusta allí los filtros. El snooze envía al backend exactamente `5m`.
-
-La estabilidad del ID depende del proveedor del backend. En el proveedor JSON, TaskProvider usa la posición de cada tarea en el array completo almacenado, incluidas las completadas; reordenar ese array puede cambiar el ID. En el proveedor Obsidian, ObsidianTaskModel calcula un MD5 a partir de la descripción, la ruta del archivo y la línea; cambios en esos valores pueden cambiarlo. Por eso la extensión vuelve a comprobar los tres campos de identidad contra agenda y listado antes de actuar. Además, la selección y la página son compartidas por el gestor web y otros clientes. El grupo FIFO evita que se intercalen operaciones de las páginas de esta extensión, pero el backend actual no ofrece una acción atómica por UID que evite una carrera con clientes externos.
-
-El backend no coordina a los consumidores de notificaciones y mantiene una única cola destructiva compartida. **Un solo lector debe consumirla.** El frontend React conectado llama a `/notifications?mask_as_read=true` cada 20 segundos. Antes de dejar activo el monitor de la extensión, cierra o desconecta el frontend web y detén cualquier otro consumidor de esa ruta. El frontend web no ofrece un control para desactivar únicamente este sondeo. Si varios lectores siguen conectados, pueden repartirse las notificaciones y el historial de la extensión no podrá recuperar las entradas que haya consumido otro cliente.
+Los IDs declarados (`id` en JSON o `[id:: …]` en Markdown) se mantienen. Si falta uno, el backend calcula un respaldo MD5 a partir de la descripción, la ruta del archivo y la posición física; la primera escritura lo fija. Un ID duplicado impide identificar el recurso de forma única. Por eso el popup vuelve a contrastar la identidad mostrada con la agenda antes de enviar una acción. Los IDs `.` y `..` se rechazan antes de cualquier petición porque podrían cambiar el destino al usarse como segmentos de ruta. El gestor completo aún no está adaptado a esta API: los comandos antiguos se rechazan sin enviar peticiones. El monitor antiguo de avisos permanece inerte y no elimina el historial guardado localmente.
 
 ## Pruebas locales
 
@@ -48,14 +34,4 @@ Con Node.js 20 o posterior, ejecuta desde `extension/`:
 node --test tests/*.test.cjs
 ```
 
-La suite usa solo `node:test`, `node:vm` y mocks locales de las APIs WebExtension y `fetch`; no instala dependencias ni necesita el backend. La compatibilidad validada cubre Firefox 140.13.0esr y Chromium 150+.
-
-## Compatibilidad de identidad de tareas
-
-El backend devuelve `TaskEntry.id` desde `getTaskUID()` en agenda y listado, pero la semántica del ID depende del modelo: `TaskProvider` JSON usa un índice que vuelve a enumerar al reconstruir la lista; `ObsidianTaskModel` usa un MD5 derivado de descripción, archivo y línea. No se presupone que todos los IDs sean índices ni que sean durables entre cambios. Además, `get_task_information()` intenta leer `getId()` y serializa `id: "unknown"` en la información. El background vuelve a leer el listado en el grupo FIFO, valida la identidad de la fila para esa instantánea, solicita `/task_N` y acepta `unknown` solo si descripción y contexto coinciden con la fila esperada. La respuesta devuelve el ID verificado del listado actual, sin presentarlo como identificador permanente. Esta adaptación no cambia el contrato ni el backend.
-
-Para una fila de una página distinta de la actual, el grupo empieza en `/list`, avanza con `/next` hasta la página solicitada y comprueba la página, el total y el ID devuelto para la fila antes de seleccionar o mutar. Así evita que otra página de esta extensión cambie la selección compartida del backend entre la validación de identidad y la acción. La cola FIFO solo serializa esta extensión: no aísla ni coordina la web React u otros clientes del backend.
-
-## Custodia del token en el monitor
-
-El monitor oculta coincidencias exactas del token en mensajes y timestamps antes de guardarlos en el historial local y antes de generar avisos nativos. Las descripciones de los recordatorios `alert` se redactan antes de truncarse para el aviso. Esto evita exponer la credencial si el backend la incluye en esos campos; la autenticación sigue usando el token configurado. La redacción se aplica al contenido nuevo recibido por el monitor.
+La suite verifica el contrato de mensajes, el control de permisos, la validación de destinos HTTPS, los errores y las respuestas inciertas mediante dobles locales. También realiza una prueba de loopback con un certificado de prueba temporal para comprobar TLS, una identidad de servidor incorrecta y el rechazo de redirecciones a HTTP. Esa prueba no configura certificados del sistema ni sustituye las pruebas de permisos y confianza en los navegadores.

@@ -16,9 +16,9 @@
     "open_in_tab": true
   },
   "permissions": ["storage", "alarms", "notifications"],
-  "host_permissions": ["http://*/*"],
+  "optional_host_permissions": ["https://*/*"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self';"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https:;"
   },
   "icons": {
     "16": "icons/icon-16.png",

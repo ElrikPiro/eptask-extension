@@ -57,6 +57,11 @@ export const browserApi = Object.freeze({
   tabs: Object.freeze({
     create: (properties) => invoke(namespace.tabs, "create", [properties]),
   }),
+  permissions: Object.freeze({
+    request: (details) => invoke(namespace.permissions, "request", [details]),
+    contains: (details) => invoke(namespace.permissions, "contains", [details]),
+    remove: (details) => invoke(namespace.permissions, "remove", [details]),
+  }),
   storage: Object.freeze({
     local: Object.freeze({
       get: (keys) => invoke(namespace.storage?.local, "get", [keys]),

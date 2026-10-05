@@ -85,6 +85,11 @@ class FakeElement {
     this.attributes.set(name, String(value));
   }
 
+  removeAttribute(name) {
+    this.attributes.delete(name);
+    if (name === "title") this.title = "";
+  }
+
   append(...children) {
     this._textContent = "";
     this.children.push(...children);
@@ -106,7 +111,7 @@ class FakeElement {
 function bootPopup({ initialSettings = readySettings(), respond } = {}) {
   const selectors = [
     "#popup-status", "#urgent-task", "#open-options", "#open-manager",
-    "#refresh-agenda", "#complete-task", "#snooze-task",
+    "#refresh-agenda", "#complete-task", "#snooze-task", "#popup-error-badge",
   ];
   const elements = new Map(selectors.map((selector) => [selector, new FakeElement() ]));
   for (const selector of ["#refresh-agenda", "#complete-task", "#snooze-task"]) {
@@ -151,7 +156,10 @@ function bootPopup({ initialSettings = readySettings(), respond } = {}) {
     },
     assertSuccessfulReply(reply) {
       if (reply?.ok === true) return reply;
-      throw new Error(reply?.error?.message || "La operación no se pudo completar.");
+      const error = new Error(reply?.error?.message || "La operación no se pudo completar.");
+      error.kind = typeof reply?.error?.kind === "string" ? reply.error.kind : "gateway-unavailable";
+      error.status = Number.isInteger(reply?.status) ? reply.status : null;
+      throw error;
     },
     isReady(settings) {
       return Boolean(
@@ -206,6 +214,39 @@ test("popup loads the first urgent agenda task and enables its accessible action
   assert.equal(env.elements.get("#complete-task").disabled, false);
   assert.equal(env.elements.get("#snooze-task").disabled, false);
   assert.equal(env.elements.get("#refresh-agenda").disabled, false);
+});
+
+test("popup maps a HAL agenda resource into the displayed task without exposing transport fields", async () => {
+  const env = bootPopup({
+    respond: (operation) => operation === "GET_AGENDA"
+      ? Promise.resolve(success({
+        _embedded: {
+          activeUrgentTasks: [{
+            id: "task/ä",
+            description: "Prepare the release",
+            context: "work",
+            due: "2026-10-05",
+            status: "active",
+            totalCost: { value: "5", unit: "pomodoro" },
+            investedEffort: { value: "2", unit: "pomodoro" },
+            _links: { self: { href: "https://api.example.test/api/v1/tasks/task%2F%C3%A4" } },
+          }],
+        },
+      }))
+      : Promise.resolve(success({})),
+  });
+
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "HAL agenda conversion");
+  assert.deepEqual(JSON.parse(JSON.stringify(env.state().task)), {
+    id: "task/ä",
+    description: "Prepare the release",
+    context: "work",
+    due: "2026-10-05",
+    status: "active",
+    total_cost: 3,
+  });
+  assert.doesNotMatch(env.elements.get("#urgent-task").textContent, /https:\/\//);
+  assert.match(env.elements.get("#urgent-task").textContent, /3\.00p/);
 });
 
 test("actions stay disabled without a connection or when the agenda has no urgent task", async () => {
@@ -283,7 +324,7 @@ test("an action error stays uncertain and requires a successful manual agenda re
   const env = bootPopup({
     respond: (operation) => {
       if (operation === "GET_AGENDA") return Promise.resolve(success({ active_urgent_tasks: [first] }));
-      return Promise.resolve({ ok: false, error: { message: "Respuesta perdida" } });
+      return Promise.resolve({ ok: false, status: null, error: { kind: "uncertain", message: "Respuesta perdida" } });
     },
   });
   await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial task");
@@ -293,7 +334,7 @@ test("an action error stays uncertain and requires a successful manual agenda re
   assert.equal(env.state().needsRefreshBeforeAction, true);
   assert.equal(env.elements.get("#complete-task").disabled, true);
   assert.equal(env.elements.get("#snooze-task").disabled, true);
-  assert.match(env.elements.get("#popup-status").textContent, /No se pudo confirmar si la acción se aplicó/);
+  assert.match(env.elements.get("#popup-status").textContent, /No se pudo completar la acción/);
   assert.equal(env.calls.filter((call) => call.operation === "POPUP_DONE").length, 1);
   assert.equal(env.calls.filter((call) => call.operation === "GET_AGENDA").length, 1);
 
@@ -313,7 +354,7 @@ test("a successful mutation remains confirmed when the following agenda refresh 
         const getCount = calls.filter((call) => call.operation === "GET_AGENDA").length;
         return getCount === 1
           ? Promise.resolve(success({ active_urgent_tasks: [visibleTask] }))
-          : Promise.resolve({ ok: false, error: { message: "Servidor no disponible" } });
+          : Promise.resolve({ ok: false, status: null, error: { kind: "network", message: "Servidor no disponible" } });
       }
       return Promise.resolve(success({ message: "done" }));
     },
@@ -323,7 +364,7 @@ test("a successful mutation remains confirmed when the following agenda refresh 
   await waitFor(() => env.calls.filter((call) => call.operation === "GET_AGENDA").length === 2, "failed post-action agenda refresh");
   await waitFor(() => !env.state().agendaLoading && !env.state().activeAction, "post-action refresh failure handling");
 
-  assert.match(env.elements.get("#popup-status").textContent, /Tarea completada\. No se pudo actualizar la agenda: Servidor no disponible/);
+  assert.match(env.elements.get("#popup-status").textContent, /Tarea completada\. No se pudo actualizar la agenda: No se pudo conectar con el servidor\./);
   assert.equal(env.calls.filter((call) => call.operation === "POPUP_DONE").length, 1);
   assert.equal(env.elements.get("#complete-task").disabled, true);
   assert.equal(env.elements.get("#snooze-task").disabled, true);
@@ -337,9 +378,9 @@ test("a failed mutation stays unverified when the manual refresh also fails", as
         const getCount = calls.filter((call) => call.operation === "GET_AGENDA").length;
         return getCount === 1
           ? Promise.resolve(success({ active_urgent_tasks: [task("uid-uncertain", "Verify payment")] }))
-          : Promise.resolve({ ok: false, error: { message: "Servidor no disponible" } });
+          : Promise.resolve({ ok: false, status: null, error: { kind: "network", message: "Servidor no disponible" } });
       }
-      return Promise.resolve({ ok: false, error: { message: "Respuesta perdida" } });
+      return Promise.resolve({ ok: false, status: null, error: { kind: "uncertain", message: "Respuesta perdida" } });
     },
   });
   await waitFor(() => env.calls.length === 1 && !env.state().agendaLoading, "initial task");
@@ -402,7 +443,7 @@ test("disconnect invalidates pending agenda and mutation replies", async () => {
   env.changeSettings({ ...readySettings(), monitorEnabled: false });
   agendaReply.resolve(success({ active_urgent_tasks: [task("uid-stale", "Stale task")] }));
   await env.flush();
-  assert.match(env.elements.get("#popup-status").textContent, /desconectado/i);
+  assert.match(env.elements.get("#popup-status").textContent, /desactivada|desconectado/i);
   assert.doesNotMatch(env.elements.get("#urgent-task").textContent, /Stale task/);
   assert.equal(env.elements.get("#complete-task").disabled, true);
 
@@ -420,8 +461,51 @@ test("disconnect invalidates pending agenda and mutation replies", async () => {
   actionReply.resolve(success({ message: "done" }));
   await env.flush();
 
-  assert.match(env.elements.get("#popup-status").textContent, /desconectado/i);
+  assert.match(env.elements.get("#popup-status").textContent, /desactivada|desconectado/i);
   assert.doesNotMatch(env.elements.get("#urgent-task").textContent, /Live task|completada/i);
   assert.equal(env.elements.get("#complete-task").disabled, true);
   assert.equal(env.calls.filter((call) => call.operation === "GET_AGENDA").length, 2);
+});
+
+test("transport errors show a safe accessible badge without inventing an HTTP status", async () => {
+  const token = "private-token-value";
+  const env = bootPopup({
+    respond: () => Promise.resolve({
+      ok: false,
+      status: null,
+      error: { kind: "tls", message: `TLS failure ${token}` },
+    }),
+  });
+
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "TLS failure state");
+  const badge = env.elements.get("#popup-error-badge");
+  assert.equal(badge.hidden, false);
+  assert.equal(badge.textContent, "!");
+  assert.match(badge.title, /conexión TLS segura/i);
+  assert.equal(badge.attributes.get("aria-label"), badge.title);
+  assert.doesNotMatch(`${badge.title} ${env.elements.get("#popup-status").textContent}`, new RegExp(token));
+  assert.doesNotMatch(badge.title, /HTTP/);
+});
+
+test("the popup shows a real HTTP status and clears its badge after a successful refresh", async () => {
+  let failing = true;
+  const env = bootPopup({
+    respond: (operation) => {
+      if (operation !== "GET_AGENDA") return Promise.resolve(success({}));
+      return Promise.resolve(failing
+        ? { ok: false, status: 503, error: { kind: "http", status: 503, message: "private backend detail" } }
+        : success({ active_urgent_tasks: [] }));
+    },
+  });
+
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "HTTP failure state");
+  const badge = env.elements.get("#popup-error-badge");
+  assert.match(badge.title, /HTTP 503/);
+  assert.doesNotMatch(badge.title, /private backend detail/);
+
+  failing = false;
+  env.elements.get("#refresh-agenda").click();
+  await waitFor(() => !env.state().agendaLoading && badge.hidden, "successful refresh to clear badge");
+  assert.equal(badge.title, "");
+  assert.equal(badge.attributes.has("aria-label"), false);
 });

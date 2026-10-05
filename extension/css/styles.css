@@ -142,6 +142,10 @@ pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(
 .popup-page { min-width: 340px; width: 380px; min-height: 0; background: linear-gradient(165deg, #f8f8f2, #e5eee7); }
 .popup-shell { display: grid; gap: 0.8rem; padding: 1rem; }
 .popup-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.popup-header-actions { display: flex; align-items: center; gap: 0.55rem; }
+.popup-error-badge { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border: 1px solid rgba(140, 48, 48, 0.45); border-radius: 999px; background: rgba(140, 48, 48, 0.13); color: var(--danger); font-weight: 900; cursor: help; }
+.popup-error-badge:focus-visible { outline: 3px solid rgba(140, 48, 48, 0.28); outline-offset: 2px; }
+.popup-error-badge[hidden] { display: none; }
 .popup-header h1 { font-size: 1.25rem; }
 .popup-header .eyebrow { margin-bottom: 0.2rem; }
 .icon-button { width: 2.45rem; height: 2.45rem; padding: 0; border-radius: 0.75rem; font-size: 1.2rem; }

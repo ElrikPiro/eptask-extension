@@ -58,7 +58,8 @@ test("both source manifests and the active manifest point to local, present reso
   for (const manifest of [chromium, firefox, active]) {
     assert.equal(manifest.manifest_version, 3);
     assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "alarms", "notifications"]));
-    assert.ok(manifest.host_permissions.includes("http://*/*"));
+    assert.deepEqual(manifest.optional_host_permissions, ["https://*/*"]);
+    assert.equal(manifest.host_permissions, undefined);
     assert.equal(manifest.action.default_popup, "popup.html");
     assert.equal(manifest.options_ui.page, "options.html");
     assert.equal(manifest.options_ui.open_in_tab, true);
@@ -74,16 +75,17 @@ test("both source manifests and the active manifest point to local, present reso
   );
 });
 
-test("all manifests use a local-only CSP without rewriting HTTP backend requests", () => {
+test("all manifests permit secure background connections without broad HTTP access", () => {
   for (const name of ["manifest.json", "manifest.chromium.json", "manifest.firefox.json"]) {
     const manifest = JSON.parse(read(name));
     const policy = manifest.content_security_policy?.extension_pages;
 
     assert.equal(typeof policy, "string", `${name} must explicitly declare extension_pages CSP`);
-    assert.match(policy, /^script-src 'self'; object-src 'self';$/);
-    assert.doesNotMatch(policy, /(?:^|;)\s*connect-src\b/i);
+    assert.match(policy, /^script-src 'self'; object-src 'self'; connect-src https:;$/);
+    assert.deepEqual(manifest.optional_host_permissions, ["https://*/*"]);
+    assert.equal(manifest.host_permissions, undefined);
     assert.doesNotMatch(policy, /(?:^|;)\s*upgrade-insecure-requests\b/i);
-    assert.doesNotMatch(policy, /'unsafe-eval'|https?:\/\//i);
+    assert.doesNotMatch(policy, /'unsafe-eval'|http:\/\//i);
   }
 });
 
@@ -110,7 +112,7 @@ test("HTML and module dependency graph stays local and has no inline handlers or
   for (const modulePath of moduleFiles) visit(modulePath);
 });
 
-test("only the background owns HTTP; UI reads local notification history and renders backend text safely", () => {
+test("only the background owns network access; UI renders local state safely", () => {
   const jsFiles = fs.readdirSync(path.join(extensionRoot, "js"))
     .filter((file) => file.endsWith(".js"))
     .map((file) => path.join("js", file));
@@ -119,61 +121,45 @@ test("only the background owns HTTP; UI reads local notification history and ren
 
   assert.match(background, /fetch\(/);
   assert.doesNotMatch(uiSource, /\bfetch\s*\(|XMLHttpRequest|X-Atm-Target/);
-  assert.doesNotMatch(uiSource, /GET_NOTIFICATIONS|\/notifications(?:\?|['"`])/);
+  assert.doesNotMatch(uiSource, /GET_NOTIFICATIONS|\/notifications\?mask_as_read/i);
   assert.match(uiSource, /notificationHistory\.v1/);
   assert.match(read("js/render.js"), /textContent/);
   assert.doesNotMatch(uiSource, /\.innerHTML\s*=|insertAdjacentHTML\s*\(/);
 });
 
-test("popup reads the first agenda task and exposes only identity-checked urgent-task actions", () => {
+test("popup reads the first agenda task, uses the supported task actions, and exposes a safe error badge", () => {
   const popup = read("js/popup.js");
   const html = read("popup.html");
   assert.match(popup, /GET_AGENDA/);
-  assert.match(popup, /active_urgent_tasks\[0\]/);
+  assert.match(popup, /popupAgendaTasks/);
+  assert.match(popup, /urgentTasks\[0\]/);
   assert.doesNotMatch(popup, /GET_INFO|SELECT_TASK|task_1|\/info/);
   assert.match(popup, /"POPUP_DONE"/);
   assert.match(popup, /"POPUP_SNOOZE"/);
   assert.match(popup, /expectedTask/);
   assert.match(html, /id="complete-task"[^>]*disabled>Completar/);
   assert.match(html, /id="snooze-task"[^>]*disabled>Posponer 5 minutos/);
+  assert.match(html, /id="popup-error-badge"[^>]*role="img"[^>]*hidden/);
+  assert.match(popup, /popup-error-badge/);
+  assert.match(popup, /kind === "http"/);
+  assert.match(popup, /SAFE_ERRORS/);
 });
 
-test("manager markup and handlers cover the current TaskManagerApi operation families", () => {
+test("legacy manager markup remains local while unsupported commands are retired by the gateway", () => {
   const html = read("index.html");
   const app = read("js/app.js");
-  const operations = [
-    "GET_LIST", "NEXT", "PREVIOUS", "SELECT_TASK", "GET_INFO",
-    "GET_HEURISTICS", "SELECT_HEURISTIC", "GET_ALGORITHMS", "SELECT_ALGORITHM",
-    "GET_FILTERS", "TOGGLE_FILTER", "DONE", "SET", "NEW", "SCHEDULE", "WORK",
-    "SNOOZE", "SEARCH", "GET_STATS", "GET_AGENDA", "GET_EVENTS", "PROJECT", "RAISE",
-  ];
-  for (const operation of operations) assert.ok(app.includes(`"${operation}"`), `manager does not call ${operation}`);
-  for (const formId of ["set-form", "new-form", "work-form", "schedule-form", "snooze-form", "search-form", "project-form", "raise-form"]) {
-    assert.match(html, new RegExp(`id="${formId}"`));
-  }
-  for (const view of ["tasks", "agenda", "stats", "events", "selectedTask"]) assert.ok(html.includes(`data-view="${view}"`));
-  for (const action of ["refresh-list", "previous", "next", "get-info", "done", "refresh-agenda", "refresh-stats", "refresh-events"]) {
-    assert.ok(html.includes(`data-action="${action}"`), `manager markup lacks ${action}`);
-  }
+  assert.match(html, /<script type="module" src="js\/app\.js"><\/script>/);
+  assert.doesNotMatch(app, /fetch\s*\(|XMLHttpRequest/);
+  assert.match(read("js/messages.js"), /unsupported-operation/);
 });
 
-test("options masks token and the manager clears only its own local notification history", () => {
+test("options uses HTTPS, requests connection through settings RPC, and masks the token", () => {
   assert.match(read("options.html"), /id="token"[^>]*type="password"/);
+  assert.match(read("options.html"), /https:\/\/servidor/);
+  assert.match(read("options.html"), /id="timeout-ms"/);
   assert.match(read("js/options.js"), /settingsMessages\.connect/);
-  assert.match(read("js/app.js"), /clearHistory\(\)/);
-  assert.match(read("js/messages.js"), /history\.clear/);
-  assert.match(read("js/storage-view.js"), /storage\.onChanged/);
-});
-
-test("manager retains list UID and page when selecting from paginated or agenda results", () => {
-  const app = read("js/app.js");
-  const render = read("js/render.js");
-  assert.match(app, /async function findTaskRow\(taskId/);
-  assert.match(app, /entry\.id === taskId/);
-  assert.match(app, /request\("NEXT"\)/);
-  assert.match(app, /request\("SELECT_TASK",\s*\{\s*index,\s*expectedTaskId:\s*task\.id,\s*page\s*\}\)/);
-  assert.match(app, /data\.task\.id !== task\.id/);
-  assert.match(render, /task\.id && task\.id !== "unknown"/);
+  assert.match(read("js/options.js"), /timeoutMs/);
+  assert.match(read("js/messages.js"), /settings\.connect/);
 });
 
 test("native extension contains no bundled framework, build output, or package dependency", () => {

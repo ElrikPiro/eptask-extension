@@ -38,23 +38,28 @@ function response(body, status = 200, contentType = "application/json") {
   };
 }
 
-function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test", supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
+function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test", extensionOrigin, initialPermissions = [], permissionRequestResult = true, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
   const changes = createEvent();
   const localData = clone(initialStorage) || {};
+  const allowedPermissions = new Set(initialPermissions);
+  const permissionCalls = [];
   const storageWrites = [];
   const timeline = [];
   const alarmData = new Map();
   const alarmCreates = [];
   const notificationCalls = [];
-  const badgeState = { text: "", textColor: null, backgroundColor: null };
+  const badgeState = { text: "", textColor: null, backgroundColor: null, title: "ElrikPiro" };
   const actionCalls = [];
+  const extensionBase = extensionOrigin || (mode === "browser"
+    ? "moz-extension://a1b2c3d4-e5f6-4789-8abc-1234567890ab"
+    : `chrome-extension://${extensionId}`);
   const runtime = {
     id: extensionId,
     lastError: null,
     onMessage: createEvent(),
     onInstalled: createEvent(),
     onStartup: createEvent(),
-    getURL: (relativePath) => `moz-extension://${extensionId}/${relativePath}`,
+    getURL: (relativePath) => `${extensionBase}/${relativePath}`,
     openOptionsPage: callbackMethod(async () => undefined, mode),
     sendMessage: callbackMethod(async () => undefined, mode),
   };
@@ -149,6 +154,13 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
       if (callback) callback();
       return mode === "browser" ? Promise.resolve() : undefined;
     },
+    setTitle(details, callback) {
+      badgeState.title = details.title;
+      actionCalls.push({ method: "setTitle", details: clone(details) });
+      timeline.push({ type: "action.setTitle", details: clone(details) });
+      if (callback) callback();
+      return mode === "browser" ? Promise.resolve() : undefined;
+    },
   };
   if (supportsBadgeTextColor) {
     action.setBadgeTextColor = function (details, callback) {
@@ -173,8 +185,39 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
     create: callbackMethod(async (properties) => ({ id: 1, ...properties }), mode),
   };
 
+  const permissions = {
+    request(details, callback) {
+      const normalized = clone(details);
+      permissionCalls.push({ method: "request", details: normalized });
+      timeline.push({ type: "permissions.request", details: normalized });
+      return callbackMethod(async () => {
+        const granted = typeof permissionRequestResult === "function"
+          ? await permissionRequestResult(normalized)
+          : permissionRequestResult;
+        if (granted === true) for (const origin of normalized.origins || []) allowedPermissions.add(origin);
+        return granted === true;
+      }, mode)(callback);
+    },
+    contains(details, callback) {
+      const normalized = clone(details);
+      permissionCalls.push({ method: "contains", details: normalized });
+      timeline.push({ type: "permissions.contains", details: normalized });
+      return callbackMethod(async () => (normalized.origins || []).every((origin) => allowedPermissions.has(origin) || allowedPermissions.has("https://*/*")), mode)(callback);
+    },
+    remove(details, callback) {
+      const normalized = clone(details);
+      permissionCalls.push({ method: "remove", details: normalized });
+      timeline.push({ type: "permissions.remove", details: normalized });
+      return callbackMethod(async () => {
+        let removed = false;
+        for (const origin of normalized.origins || []) removed = allowedPermissions.delete(origin) || removed;
+        return removed;
+      }, mode)(callback);
+    },
+  };
+
   return {
-    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs, action },
+    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs, action, permissions },
     localData,
     storageWrites,
     timeline,
@@ -183,8 +226,11 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
     notificationCalls,
     badgeState,
     actionCalls,
+    permissionCalls,
+    allowedPermissions,
     events: { changes, runtime: runtime.onMessage, installed: runtime.onInstalled, startup: runtime.onStartup, alarm: alarms.onAlarm },
     extensionId,
+    extensionOrigin: extensionBase,
   };
 }
 
@@ -198,8 +244,8 @@ function callbackMethod(implementation, mode) {
   };
 }
 
-function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
-  const api = createApi({ mode, initialStorage, supportsBadgeTextColor, failBadgeTextColor });
+function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride, extensionId, extensionOrigin, initialPermissions = [], permissionRequestResult = true, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
+  const api = createApi({ mode, initialStorage, extensionId, extensionOrigin, initialPermissions, permissionRequestResult, supportsBadgeTextColor, failBadgeTextColor });
   const requests = [];
   const fetcher = fetch || (async () => response({}));
   const recordedFetch = async (url, init) => {

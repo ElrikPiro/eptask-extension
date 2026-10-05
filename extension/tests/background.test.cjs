@@ -5,562 +5,476 @@ const test = require("node:test");
 const { bootBackground, response, extensionRoot } = require("./helpers.cjs");
 
 const SETTINGS_KEY = "settings.v1";
-const HISTORY_KEY = "notificationHistory.v1";
-const STATUS_KEY = "monitorStatus.v1";
-const ALARM = "eptask-notification-monitor";
-const URGENCY_ALARM = "eptask-urgent-indicator";
+const ERROR_KEY = "gatewayError.v1";
+const BASE = "https://tasks.example.test:9443/prefix/api/v1";
+const HOST_PERMISSION = "https://tasks.example.test/*";
+const REQUEST_A = "00000000-0000-4000-8000-000000000011";
+const REQUEST_B = "00000000-0000-4000-8000-000000000012";
+const OPERATION_A = "00000000-0000-4000-8000-000000000021";
 
 function activeSettings(overrides = {}) {
   return {
     schemaVersion: 1,
-    serverUrl: "http://tasks.example.test/prefix/api",
+    serverUrl: BASE,
     token: "test-bearer-token",
     monitorEnabled: true,
+    timeoutMs: 30000,
     ...overrides,
   };
 }
 
-function agenda(tasks = []) {
-  return { active_urgent_tasks: tasks, planned_tasks_by_date: {} };
+function rpc(operation, target = null, parameters = {}, requestId = REQUEST_A) {
+  return { protocolVersion: 1, requestId, operation, target, parameters };
 }
 
-function task(id, context = "work", description = `Task ${id}`) {
-  return { id, context, description };
+function rootResource(extra = {}) {
+  return { _links: { self: { href: BASE } }, ...extra };
 }
 
-function json(value, status = 200) {
-  return response(value, status, "application/json");
+function operationReceipt(id, type, target, status = "succeeded") {
+  return {
+    id,
+    status,
+    type,
+    target,
+    parameters: {},
+    result: status === "succeeded" ? {
+      type,
+      target,
+      affectedIds: [],
+      effectsState: "none",
+      value: null,
+      _links: { affected: [] },
+    } : null,
+    failure: status === "succeeded" ? null : { code: "conflict" },
+    _links: { self: { href: `${BASE}/operations/${id}` } },
+  };
 }
 
-function plain(value) {
-  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+function boot(fetch, overrides = {}) {
+  return bootBackground({
+    initialStorage: { [SETTINGS_KEY]: activeSettings(overrides.settings) },
+    initialPermissions: overrides.initialPermissions ?? [HOST_PERMISSION],
+    ...overrides.background,
+    fetch,
+  });
 }
 
-async function waitFor(predicate, description, timeoutMs = 1_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.fail(`Timed out waiting for ${description}`);
+function sender(env, page = "index.html", id = env.extensionId) {
+  return { id, url: env.namespace.runtime.getURL(page) };
 }
 
-async function fireAndWaitForStatus(env, name = ALARM) {
-  env.fireAlarm(name);
-  await waitFor(() => Boolean(env.localData[STATUS_KEY]), `monitor status after ${name}`);
+async function idle() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("background registers message, alarm, install, and startup listeners before async work", () => {
+test("background registers its listener synchronously and Firefox ID differs from the moz-extension origin", () => {
   const source = fs.readFileSync(path.join(extensionRoot, "background.js"), "utf8");
-  const env = bootBackground({ fetch: async () => json(agenda()) });
+  const env = boot(async () => response(rootResource()));
+  const extensionUrl = new URL(env.namespace.runtime.getURL("index.html"));
 
   assert.equal(env.events.runtime.listeners.length, 1);
   assert.equal(env.events.alarm.listeners.length, 1);
   assert.equal(env.events.installed.listeners.length, 1);
   assert.equal(env.events.startup.listeners.length, 1);
+  assert.notEqual(env.extensionId, extensionUrl.host);
+  assert.equal(extensionUrl.protocol, "moz-extension:");
   assert.match(source, /onMessage\.addListener/);
 });
 
-for (const mode of ["browser", "chrome"]) {
-  test(`${mode} adapter sends allowlisted requests to the configured prefixed URL with Bearer auth`, async () => {
-    const env = bootBackground({
-      mode,
-      initialStorage: { [SETTINGS_KEY]: activeSettings() },
-      fetch: async () => json(agenda()),
-    });
-    const reply = plain(await env.send({ type: "gateway.call", requestId: "agenda-1", operation: "GET_AGENDA", args: {} }));
-
-    assert.equal(reply.requestId, "agenda-1");
-    assert.equal(reply.ok, true);
-    assert.equal(env.requests.length, 1);
-    assert.equal(env.requests[0].url, "http://tasks.example.test/prefix/api/agenda");
-    assert.equal(env.requests[0].init.method, "GET");
-    assert.equal(env.requests[0].init.headers.Authorization, "Bearer test-bearer-token");
-    assert.equal(env.requests[0].init.body, undefined);
-    assert.equal(env.requests[0].init.headers["X-Atm-Target"], undefined);
-  });
-}
-
-test("dependent task action reselection and ID check stay in FIFO order; arguments use URLSearchParams", async () => {
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (url) => {
-      if (String(url).endsWith("/list")) return json({ tasks: [
-        ...Array.from({ length: 6 }, (_, index) => ({ id: `other-${index + 1}`, description: `Other ${index + 1}`, context: "work" })),
-        { id: "task-seven", description: "Pay invoice", context: "work" },
-      ] });
-      if (String(url).endsWith("/task_7")) return json({ task: { id: "unknown", description: "Pay invoice", context: "work" } });
-      return json({ changed: true });
-    },
-  });
-  const reply = plain(await env.send({
-    type: "gateway.call",
-    requestId: "set-1",
-    operation: "SET",
-    args: { param: "due", value: "tomorrow & details?", target: { index: 7, expectedTaskId: "task-seven" } },
-  }));
-
-  assert.equal(reply.ok, true);
-  assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), [
-    "/prefix/api/list",
-    "/prefix/api/task_7",
-    "/prefix/api/set",
-    "/prefix/api/agenda",
-  ]);
-  assert.equal(new URL(env.requests[2].url).searchParams.get("args"), "due tomorrow & details?");
-  assert.equal(env.requests.every((request) => request.init.method === "GET" && request.init.body === undefined), true);
-});
-
-test("action refuses to run when the selected task ID differs", async () => {
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async () => json({ tasks: [{ id: "different-task", description: "Other", context: "work" }] }),
-  });
-  const reply = plain(await env.send({
-    type: "gateway.call",
-    requestId: "work-stale",
-    operation: "WORK",
-    args: { amount: "20m", target: { index: 4, expectedTaskId: "expected-task" } },
-  }));
-
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.kind, "invalid-response");
-  assert.equal(env.requests.length, 1);
-  assert.match(new URL(env.requests[0].url).pathname, /\/list$/);
-});
-
-test("GET_INFO and SELECT_TASK normalize a raw unknown detail ID using the verified UID row", async () => {
-  const row = { id: "stable-uid-1", description: "Write report", context: "work" };
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (url) => {
-      if (String(url).endsWith("/list")) return json({ tasks: [row] });
-      if (String(url).endsWith("/task_1")) return json({ task: { id: "unknown", description: row.description, context: row.context } });
-      if (String(url).endsWith("/info")) return json({ task: { id: "unknown", description: row.description, context: row.context }, extended: { metadata: "local" } });
-      return json({});
-    },
-  });
-  const selected = plain(await env.send({
-    type: "gateway.call", requestId: "select-1", operation: "SELECT_TASK", args: { index: 1, expectedTaskId: row.id },
-  }));
-  const info = plain(await env.send({
-    type: "gateway.call", requestId: "info-1", operation: "GET_INFO", args: { target: { index: 1, expectedTaskId: row.id } },
-  }));
-
-  assert.equal(selected.ok, true);
-  assert.equal(selected.data.task.id, row.id);
-  assert.equal(selected.verifiedTaskId, row.id);
-  assert.equal(info.ok, true);
-  assert.equal(info.data.task.id, row.id);
-  assert.equal(info.data.extended.metadata, "local");
-  assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), [
-    "/prefix/api/list", "/prefix/api/task_1",
-    "/prefix/api/list", "/prefix/api/task_1", "/prefix/api/info",
-  ]);
-});
-
-test("page-two selection restores pagination inside one FIFO group before UID validation", async () => {
-  const row = { id: "page-two-uid", description: "Second page task", context: "project" };
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (url) => {
-      const pathName = new URL(url).pathname;
-      if (pathName.endsWith("/list")) return json({ tasks: [{ id: "page-one-uid", description: "First page", context: "work" }], current_page: 1, total_pages: 2 });
-      if (pathName.endsWith("/next")) return json({ tasks: [row], current_page: 2, total_pages: 2 });
-      if (pathName.endsWith("/task_1")) return json({ task: { id: "unknown", description: row.description, context: row.context } });
-      return json({ worked: true });
-    },
-  });
-  const reply = plain(await env.send({
-    type: "gateway.call", requestId: "page-two", operation: "WORK",
-    args: { amount: "20m", target: { index: 1, page: 2, expectedTaskId: row.id } },
-  }));
-
-  assert.equal(reply.ok, true);
-  assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), [
-    "/prefix/api/list", "/prefix/api/next", "/prefix/api/task_1", "/prefix/api/work", "/prefix/api/agenda",
-  ]);
-});
-
-test("out-of-range task page is rejected before paging or selection", async () => {
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async () => json({ tasks: [{ id: "uid", description: "Only task", context: "work" }], current_page: 1, total_pages: 1 }),
-  });
-  const reply = plain(await env.send({
-    type: "gateway.call", requestId: "past-last-page", operation: "DONE",
-    args: { target: { index: 1, page: 2, expectedTaskId: "uid" } },
-  }));
-
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.kind, "invalid-response");
-  assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), ["/prefix/api/list"]);
-});
-
-test("configuration change during page navigation prevents task selection and mutation", async () => {
-  let releaseNext;
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (url) => {
-      const pathName = new URL(url).pathname;
-      if (pathName.endsWith("/list")) return json({ tasks: [{ id: "page-one-uid", description: "First page", context: "work" }], current_page: 1, total_pages: 2 });
-      if (pathName.endsWith("/next")) return new Promise((resolve) => { releaseNext = () => resolve(json({ tasks: [{ id: "page-two-uid", description: "Second page", context: "work" }], current_page: 2, total_pages: 2 })); });
-      return json({ task: { id: "page-two-uid", description: "Second page", context: "work" } });
-    },
-  });
-  const action = env.send({
-    type: "gateway.call", requestId: "page-race", operation: "WORK",
-    args: { amount: "20m", target: { index: 1, page: 2, expectedTaskId: "page-two-uid" } },
-  });
-  await waitFor(() => env.requests.length === 2, "next-page request");
-  const disconnected = plain(await env.send({ type: "settings.disconnect", requestId: "disconnect-page-race", args: {} }));
-  assert.equal(disconnected.ok, true);
-  releaseNext();
-  const reply = plain(await action);
-
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.kind, "invalid-config");
-  assert.deepEqual(env.requests.map((request) => new URL(request.url).pathname), ["/prefix/api/list", "/prefix/api/next"]);
-});
-
-test("selection rejects a short or incompatible backend page before calling /task_N", async (t) => {
-  const scenarios = [
-    { name: "short page", list: { tasks: [] } },
-    { name: "different selected description", list: { tasks: [{ id: "stable-uid-1", description: "Other", context: "work" }] }, detail: { task: { id: "unknown", description: "Expected", context: "work" } } },
-    { name: "different selected context", list: { tasks: [{ id: "stable-uid-1", description: "Expected", context: "work" }] }, detail: { task: { id: "unknown", description: "Expected", context: "alert" } } },
-    { name: "unexpected non-unknown ID", list: { tasks: [{ id: "stable-uid-1", description: "Expected", context: "work" }] }, detail: { task: { id: "other-uid", description: "Expected", context: "work" } } },
+test("sender ID, exact extension page URL, and page allowlist are checked before storage or network access", async (t) => {
+  const cases = [
+    { name: "foreign runtime ID", sender: (env) => sender(env, "index.html", "foreign-extension") },
+    { name: "origin UUID used as runtime ID", sender: (env) => sender(env, "index.html", new URL(env.namespace.runtime.getURL("index.html")).host) },
+    { name: "wrong extension origin", sender: (env) => ({ id: env.extensionId, url: "moz-extension://another-id/index.html" }) },
+    { name: "query appended to a valid page URL", sender: (env) => ({ id: env.extensionId, url: `${env.namespace.runtime.getURL("index.html")}?operation=tasks.patch` }) },
+    { name: "unlisted extension page", sender: (env) => sender(env, "storage-view.html") },
   ];
-  for (const scenario of scenarios) {
-    await t.test(scenario.name, async () => {
-      const env = bootBackground({
-        initialStorage: { [SETTINGS_KEY]: activeSettings() },
-        fetch: async (url) => String(url).endsWith("/list") ? json(scenario.list) : json(scenario.detail || {}),
-      });
-      const reply = plain(await env.send({
-        type: "gateway.call", requestId: scenario.name, operation: "SELECT_TASK", args: { index: 1, expectedTaskId: "stable-uid-1" },
-      }));
 
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const env = boot(async () => response(rootResource()));
+      const reply = await env.send(rpc("root.read"), scenario.sender(env));
       assert.equal(reply.ok, false);
-      assert.equal(reply.error.kind, "invalid-response");
-      assert.equal(env.requests.some((request) => /\/task_1(?:\?|$)/.test(request.url)), scenario.name !== "short page");
+      assert.equal(reply.error.kind, "unauthorized-sender");
+      assert.equal(reply.requestId, REQUEST_A);
+      assert.equal(env.requests.length, 0);
+      assert.equal(env.permissionCalls.length, 0);
     });
   }
 });
 
-test("concurrent gateway calls are dispatched FIFO, one HTTP request at a time", async () => {
-  let releaseFirst;
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (_url, _init) => {
-      if (!releaseFirst) return new Promise((resolve) => { releaseFirst = () => resolve(json(agenda())); });
-      return json(agenda());
-    },
-  });
-  const first = env.send({ type: "gateway.call", requestId: "fifo-1", operation: "GET_AGENDA", args: {} });
-  await waitFor(() => env.requests.length === 1, "first FIFO request");
-  const second = env.send({ type: "gateway.call", requestId: "fifo-2", operation: "GET_AGENDA", args: {} });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.requests.length, 1, "second request must wait for the first response");
+test("RPC envelope rejects wrong versions, unknown keys, non-UUID IDs, and legacy messages without fetching", async (t) => {
+  const cases = [
+    { name: "wrong version", message: { ...rpc("root.read"), protocolVersion: 2 } },
+    { name: "extra top-level secret field", message: { ...rpc("root.read"), token: "must-not-pass" } },
+    { name: "malformed request ID", message: { ...rpc("root.read"), requestId: "not-a-uuid" } },
+    { name: "retired message shape", message: { type: "gateway.call", requestId: REQUEST_A, operation: "GET_LIST", args: {} } },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const env = boot(async () => response(rootResource()));
+      const reply = await env.send(scenario.message, sender(env));
+      assert.equal(reply.ok, false);
+      assert.equal(reply.error.kind, "invalid-request");
+      assert.equal(env.requests.length, 0);
+    });
+  }
+});
 
-  releaseFirst();
-  const replies = await Promise.all([first, second]);
-  assert.deepEqual(replies.map((reply) => plain(reply).requestId), ["fifo-1", "fifo-2"]);
+test("settings operations require a null target before changing configuration", async () => {
+  const env = boot(async () => response(rootResource()));
+  const before = structuredClone(env.localData[SETTINGS_KEY]);
+  const reply = await env.send(rpc("settings.disconnect", { kind: "task", id: "task-1" }, {}), sender(env, "options.html"));
+
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.kind, "invalid-request");
+  assert.deepEqual(env.localData[SETTINGS_KEY], before);
+  assert.equal(env.storageWrites.length, 0);
+  assert.equal(env.requests.length, 0);
+});
+
+test("revoked host permission is checked before fetch and disarms the stored monitor", async () => {
+  const env = boot(async () => response(rootResource()));
+  env.allowedPermissions.delete(HOST_PERMISSION);
+  const reply = await env.send(rpc("root.read"), sender(env));
+
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.kind, "permission-required");
+  assert.equal(reply.status, null);
+  assert.equal(env.requests.length, 0);
+  assert.deepEqual(env.permissionCalls.map(({ method, details }) => ({ method, details })), [
+    { method: "contains", details: { origins: [HOST_PERMISSION] } },
+  ]);
+  assert.equal(env.localData[SETTINGS_KEY].monitorEnabled, false);
+});
+
+test("typed task-list parameters become a bounded query while authentication stays in the background", async () => {
+  const env = boot(async () => response(rootResource({ _embedded: { tasks: [] } })));
+  const reply = await env.send(rpc("tasks.list", null, {
+    page: 2,
+    pageSize: 20,
+    filters: ["open", "urgent"],
+    heuristic: "priority",
+    algorithm: "due-date",
+    search: ["invoice & report"],
+  }), sender(env));
+
+  assert.equal(reply.ok, true);
+  const request = env.requests[0];
+  const url = new URL(request.url);
+  assert.equal(url.origin, "https://tasks.example.test:9443");
+  assert.equal(url.pathname, "/prefix/api/v1/tasks");
+  assert.equal(url.searchParams.get("page"), "2");
+  assert.equal(url.searchParams.get("pageSize"), "20");
+  assert.deepEqual(url.searchParams.getAll("filters"), ["open", "urgent"]);
+  assert.equal(url.searchParams.get("search"), "invoice & report");
+  assert.equal(url.searchParams.get("algorithm"), "due-date");
+  assert.equal(url.searchParams.get("heuristic"), "priority");
+  assert.equal(request.init.method, "GET");
+  assert.equal(request.init.body, undefined);
+  assert.equal(request.init.redirect, "error");
+  assert.equal(request.init.cache, "no-store");
+  assert.equal(request.init.credentials, "omit");
+  assert.equal(request.init.headers.Authorization, "Bearer test-bearer-token");
+});
+
+test("resource IDs are encoded as one UTF-8 path segment and dot-segment identities fail before fetch", async (t) => {
+  const resourceId = "project/週 & plan";
+  const expectedPath = `/prefix/api/v1/projects/${encodeURIComponent(resourceId)}`;
+  const env = boot(async () => response({ _links: { self: { href: `https://tasks.example.test:9443${expectedPath}` } }, name: resourceId }));
+  const valid = await env.send(rpc("projects.get", { kind: "project", id: resourceId }), sender(env));
+
+  assert.equal(valid.ok, true);
+  assert.equal(new URL(env.requests[0].url).pathname, expectedPath);
+  assert.equal(env.requests[0].init.headers.Authorization, "Bearer test-bearer-token");
+
+  for (const id of [".", ".."]) {
+    await t.test(`ID ${id}`, async () => {
+      const invalidEnv = boot(async () => response(rootResource()));
+      const reply = await invalidEnv.send(rpc("tasks.get", { kind: "task", id }), sender(invalidEnv));
+      assert.equal(reply.ok, false);
+      assert.equal(reply.error.kind, "unsupported-resource-id");
+      assert.equal(reply.status, null);
+      assert.equal(invalidEnv.requests.length, 0);
+    });
+  }
+});
+
+test("hostile HAL links never become authenticated follow-up requests", async (t) => {
+  const hostileLinks = [
+    "https://attacker.example:9443/prefix/api/v1/tasks/x",
+    "https://tasks.example.test:9444/prefix/api/v1/tasks/x",
+    "https://tasks.example.test:9443/other/api/v1/tasks/x",
+    "https://tasks.example.test:9443/prefix/api/v1/../evil",
+  ];
+  for (const href of hostileLinks) {
+    await t.test(href, async () => {
+      const env = boot(async () => response({ _links: { self: { href } }, id: "task-x" }));
+      const reply = await env.send(rpc("root.read"), sender(env));
+      assert.equal(reply.ok, false);
+      assert.ok(["invalid-response", "unsupported-resource-id"].includes(reply.error.kind));
+      assert.equal(env.requests.length, 1);
+      assert.equal(env.requests[0].init.headers.Authorization, "Bearer test-bearer-token");
+      assert.equal(env.requests.some((request) => new URL(request.url).host !== "tasks.example.test:9443"), false);
+    });
+  }
+});
+
+test("PATCH uses merge-patch JSON and rejects unknown fields before writing", async (t) => {
+  const id = "task/東京";
+  const env = boot(async (url, init) => {
+    assert.equal(init.method, "PATCH");
+    assert.equal(init.headers["Content-Type"], "application/merge-patch+json");
+    assert.equal(new URL(url).pathname, `/prefix/api/v1/tasks/${encodeURIComponent(id)}`);
+    assert.deepEqual(JSON.parse(init.body), { description: "Updated & safe" });
+    return response({ id, description: "Updated & safe", _links: { self: { href: url } } });
+  });
+  const reply = await env.send(rpc("tasks.patch", { kind: "task", id }, { description: "Updated & safe" }), sender(env));
+  assert.equal(reply.ok, true);
+  assert.equal(reply.status, 200);
+  assert.equal(env.requests.length, 1);
+
+  const invalidEnv = boot(async () => response(rootResource()));
+  const invalid = await invalidEnv.send(rpc("tasks.patch", { kind: "task", id }, { description: "No", arbitraryCommand: "delete" }), sender(invalidEnv));
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.kind, "invalid-request");
+  assert.equal(invalidEnv.requests.length, 0);
+});
+
+test("typed operation submit posts one exact body with a separate client operation ID", async () => {
+  const target = { kind: "task", id: "uid-42" };
+  const parameters = { duration: "0.5p" };
+  const message = rpc("operations.submit", target, { id: OPERATION_A, type: "record-work", parameters });
+  const env = boot(async (url, init) => {
+    assert.equal(url, `${BASE}/operations`);
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers["Content-Type"], "application/json");
+    assert.deepEqual(JSON.parse(init.body), { id: OPERATION_A, type: "record-work", target, parameters });
+    return response(operationReceipt(OPERATION_A, "record-work", target), 201);
+  });
+  const reply = await env.send(message, sender(env));
+
+  assert.equal(reply.ok, true);
+  assert.equal(reply.status, 201);
+  assert.notEqual(message.requestId, JSON.parse(env.requests[0].init.body).id);
+  assert.equal(env.requests.length, 1);
+  assert.equal(env.requests[0].init.headers.Authorization, "Bearer test-bearer-token");
+});
+
+test("successful resource data preserves an ID that happens to contain the configured token", async () => {
+  const token = "token-part-of-task-id";
+  const id = "task-token-part-of-task-id-東京";
+  const href = `${BASE}/tasks/${encodeURIComponent(id)}`;
+  const env = boot(async (url, init) => init.method === "POST"
+    ? response(operationReceipt(OPERATION_A, "complete-task", { kind: "task", id }), 201)
+    : response({
+      id,
+      description: "Keep the resource identity exact",
+      _links: {
+        self: { href },
+        actions: { edit: { href } },
+      },
+    }), { settings: { token } });
+  const reply = await env.send(rpc("tasks.get", { kind: "task", id }), sender(env));
+
+  assert.equal(reply.ok, true);
+  assert.equal(reply.data.id, id);
+  assert.equal(reply.data._links.self.href, href);
+  assert.equal(reply.data._links.actions.edit.href, href);
+  assert.equal(env.requests[0].url, href);
+
+  const action = await env.send(rpc("operations.submit", { kind: "task", id }, {
+    id: OPERATION_A,
+    type: "complete-task",
+    parameters: {},
+  }, REQUEST_B), sender(env));
+  assert.equal(action.ok, true);
+  assert.deepEqual(JSON.parse(env.requests[1].init.body).target, { kind: "task", id });
   assert.equal(env.requests.length, 2);
 });
 
-test("invalid senders, arbitrary operations, and credentials in gateway messages never reach fetch", async () => {
-  const env = bootBackground({ initialStorage: { [SETTINGS_KEY]: activeSettings() } });
-  const external = await env.send(
-    { type: "gateway.call", requestId: "external", operation: "GET_AGENDA", args: {} },
-    { id: "attacker", url: "https://example.test/" },
-  );
-  const privateQueue = plain(await env.send({ type: "gateway.call", requestId: "queue", operation: "GET_NOTIFICATIONS", args: {} }));
-  const credentialInjection = plain(await env.send({ type: "gateway.call", requestId: "url", operation: "GET_AGENDA", args: {}, settings: activeSettings({ token: "stolen" }) }));
+test("uncertain write replies retain correlation and a receipt GET does not replay the POST", async () => {
+  const env = boot(async (url, init) => {
+    if (init.method === "POST") return response("{", 201);
+    return response(operationReceipt(OPERATION_A, "complete-task", { kind: "task", id: "uid-42" }, "pending"));
+  });
+  const submitted = await env.send(rpc("operations.submit", { kind: "task", id: "uid-42" }, {
+    id: OPERATION_A, type: "complete-task", parameters: {},
+  }), sender(env));
 
-  assert.equal(plain(external).ok, false);
-  assert.equal(privateQueue.ok, false);
-  assert.equal(credentialInjection.ok, false);
-  assert.equal(env.requests.length, 0);
+  assert.equal(submitted.ok, false);
+  assert.equal(submitted.error.kind, "uncertain");
+  assert.equal(submitted.error.effectsState, "unknown");
+  assert.equal(submitted.error.operationId, OPERATION_A);
+  assert.equal(submitted.status, 201);
+  assert.equal(env.requests.length, 1);
+  const receipt = await env.send(rpc("operations.get", { kind: "operation", id: OPERATION_A }), sender(env));
+  assert.equal(receipt.ok, true);
+  assert.equal(env.requests.length, 2);
+  assert.deepEqual(env.requests.map(({ init }) => init.method), ["POST", "GET"]);
 });
 
-test("valid empty notification batch alone opens the first-task exact-alert branch", async () => {
+test("an incomplete 2xx receipt and a 5xx problem without a reliable effects state stay uncertain", async (t) => {
   const cases = [
-    { label: "literal alert", tasks: [task("1", "alert"), task("2", "work")], notices: 1 },
-    { label: "trimmed alert", tasks: [task("1", " alert"), task("2", "alert")], notices: 0 },
-    { label: "later alert", tasks: [task("1", "work"), task("2", "alert")], notices: 0 },
-    { label: "empty agenda", tasks: [], notices: 0 },
+    {
+      name: "2xx is not a succeeded receipt",
+      fetch: async () => response(operationReceipt(OPERATION_A, "complete-task", { kind: "task", id: "uid-43" }, "failed"), 200),
+      status: 200,
+    },
+    {
+      name: "5xx does not say whether effects occurred",
+      fetch: async () => response({ code: "service-unavailable", title: "Unavailable", detail: "Try later" }, 503, "application/problem+json"),
+      status: 503,
+    },
   ];
   for (const scenario of cases) {
-    const env = bootBackground({
-      initialStorage: { [SETTINGS_KEY]: activeSettings() },
-      fetch: async (url) => String(url).includes("/notifications") ? json([]) : json(agenda(scenario.tasks)),
-    });
-    await fireAndWaitForStatus(env);
-
-    assert.equal(env.requests.length, 2, scenario.label);
-    assert.equal(env.notificationCalls.length, scenario.notices, scenario.label);
-    assert.equal(env.requests.some((request) => /\/(?:task_1|info)(?:\?|$)/.test(request.url)), false, scenario.label);
-    assert.equal(env.requests.filter((request) => request.url.includes("/notifications?")).length, 1, scenario.label);
-  }
-});
-
-test("a nonempty batch is persisted before one grouped notification and history stays capped at 500", async () => {
-  const oldRows = Array.from({ length: 500 }, (_, index) => ({
-    localId: `old-${index}`,
-    message: `old message ${index}`,
-    timestamp: `old time ${index}`,
-    receivedAt: "2026-01-01T00:00:00.000Z",
-  }));
-  const batch = [
-    { message: "first backend message", timestamp: "backend-time-1" },
-    { message: "second backend message", timestamp: "backend-time-2" },
-  ];
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings(), [HISTORY_KEY]: oldRows },
-    fetch: async () => json(batch),
-  });
-  await fireAndWaitForStatus(env);
-
-  const rows = env.localData[HISTORY_KEY];
-  assert.equal(rows.length, 500);
-  assert.equal(rows[0].localId, "old-2");
-  assert.deepEqual(rows.slice(-2).map(({ message, timestamp }) => ({ message, timestamp })), batch);
-  assert.ok(rows.at(-1).localId);
-  assert.ok(rows.at(-1).receivedAt);
-  assert.equal(env.notificationCalls.length, 1);
-  assert.match(env.notificationCalls[0].options.title, /2/);
-  const persistedAt = env.timeline.findIndex((item) => item.type === "storage.set" && item.items[HISTORY_KEY]);
-  const notifiedAt = env.timeline.findIndex((item) => item.type === "notification.create");
-  assert.ok(persistedAt >= 0 && notifiedAt > persistedAt, "notification must follow persisted history");
-  assert.equal(env.requests.length, 1, "a nonempty batch skips agenda");
-  assert.match(env.requests[0].url, /\/notifications\?mask_as_read=true$/);
-});
-
-for (const mode of ["browser", "chrome"]) {
-  test(`${mode} monitor redacts the token in stored messages, timestamps and grouped notices`, async () => {
-    const token = "test-bearer-token";
-    const batch = [
-      { message: `First ${token}; repeated ${token}`, timestamp: `time-${token}` },
-      { message: "Unaffected message", timestamp: "backend-time" },
-    ];
-    const env = bootBackground({
-      mode,
-      initialStorage: { [SETTINGS_KEY]: activeSettings({ token }) },
-      fetch: async () => json(batch),
-    });
-    await fireAndWaitForStatus(env);
-
-    assert.deepEqual(env.localData[HISTORY_KEY].map(({ message, timestamp }) => ({ message, timestamp })), [
-      { message: "First [redactado]; repeated [redactado]", timestamp: "time-[redactado]" },
-      { message: "Unaffected message", timestamp: "backend-time" },
-    ]);
-    assert.equal(env.notificationCalls.length, 1);
-    assert.equal(env.notificationCalls[0].options.message, "First [redactado]; repeated [redactado]\nUnaffected message");
-    assert.equal(JSON.stringify(env.localData[HISTORY_KEY]).includes(token), false);
-    assert.equal(JSON.stringify(env.notificationCalls).includes(token), false);
-    assert.equal(env.requests.length, 1);
-    assert.equal(env.requests[0].init.headers.Authorization, `Bearer ${token}`);
-  });
-
-  test(`${mode} monitor redacts alert descriptions before truncating native notices`, async () => {
-    const token = "test-bearer-token";
-    const description = `${token} ${"x".repeat(470)} ${token} suffix`;
-    const env = bootBackground({
-      mode,
-      initialStorage: { [SETTINGS_KEY]: activeSettings({ token }) },
-      fetch: async (url) => String(url).includes("/notifications")
-        ? json([])
-        : json(agenda([task("1", "alert", description)])),
-    });
-    await fireAndWaitForStatus(env);
-
-    const expected = `[redactado] ${"x".repeat(470)} [redactado] suffix`.slice(0, 500);
-    assert.equal(env.notificationCalls.length, 1);
-    assert.equal(env.notificationCalls[0].options.message, expected);
-    assert.equal(JSON.stringify(env.notificationCalls).includes(token), false);
-    assert.equal(env.localData[HISTORY_KEY], undefined);
-    assert.equal(env.requests.length, 2);
-    assert.ok(env.requests.every(({ init }) => init.headers.Authorization === `Bearer ${token}`));
-  });
-}
-
-test("HTTP and malformed notification failures terminate before agenda and do not notify", async (t) => {
-  const scenarios = [
-    { name: "unauthorized response", first: async () => response("Unauthorized", 401, "text/plain") },
-    { name: "server failure", first: async () => response("diagnostic test-bearer-token", 503, "text/plain") },
-    { name: "invalid JSON", first: async () => response("{oops", 200, "application/json") },
-    { name: "invalid notification shape", first: async () => json({ message: "not an array" }) },
-  ];
-  for (const scenario of scenarios) {
     await t.test(scenario.name, async () => {
-      const env = bootBackground({
-        initialStorage: { [SETTINGS_KEY]: activeSettings() },
-        fetch: scenario.first,
-      });
-      await fireAndWaitForStatus(env);
+      const env = boot(scenario.fetch);
+      const reply = await env.send(rpc("operations.submit", { kind: "task", id: "uid-43" }, {
+        id: OPERATION_A,
+        type: "complete-task",
+        parameters: {},
+      }), sender(env));
 
+      assert.equal(reply.ok, false);
+      assert.equal(reply.error.kind, "uncertain");
+      assert.equal(reply.error.effectsState, "unknown");
+      assert.equal(reply.error.operationId, OPERATION_A);
+      assert.equal(reply.status, scenario.status);
       assert.equal(env.requests.length, 1);
-      assert.equal(env.notificationCalls.length, 0);
-      assert.equal(env.requests.some((request) => request.url.endsWith("/agenda")), false);
-      assert.equal(env.localData[STATUS_KEY].ok, false);
-      assert.ok(env.localData[STATUS_KEY].error);
-      if (scenario.name === "server failure") {
-        assert.equal(env.localData[STATUS_KEY].status, 503);
-        assert.equal(JSON.stringify(env.localData[STATUS_KEY]).includes("test-bearer-token"), false);
-      }
+      assert.equal(env.requests[0].init.method, "POST");
     });
   }
 });
 
-test("notification timeout aborts the request and never falls through to agenda", async () => {
-  const scheduled = new Map();
-  let nextTimer = 1;
-  const timers = {
-    setTimeout(callback, delay) {
-      const id = nextTimer++;
-      scheduled.set(id, { callback, delay });
-      return id;
-    },
-    clearTimeout(id) { scheduled.delete(id); },
-  };
-  const env = bootBackground({
-    timers,
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (_url, init) => new Promise((_resolve, reject) => {
-      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
-    }),
-  });
-  env.fireAlarm(ALARM);
-  await waitFor(() => env.requests.length === 1, "notification request start");
-  const timer = [...scheduled.values()].find(({ delay }) => delay === 10_000);
-  assert.ok(timer, "HTTP gateway must schedule a ten-second timeout");
-  timer.callback();
-  await waitFor(() => Boolean(env.localData[STATUS_KEY]), "timeout status");
+test("typed 401 and 409 Problem Details stay determinate when effectsState is omitted", async (t) => {
+  const cases = [
+    { name: "unauthorized read", method: "GET", status: 401, expectedKind: "http", operation: "tasks.get", target: { kind: "task", id: "uid-44" } },
+    { name: "conflicting write", method: "POST", status: 409, expectedKind: "conflict", operation: "operations.submit", target: { kind: "task", id: "uid-45" } },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const requestId = scenario.status === 401 ? REQUEST_A : REQUEST_B;
+      const problem = {
+        type: "about:blank",
+        title: "Request rejected",
+        status: scenario.status,
+        detail: "The operation could not be applied.",
+        instance: "/api/v1/resource",
+        code: scenario.status === 401 ? "unauthorized" : "operation-conflict",
+        requestId,
+      };
+      const env = boot(async () => response(problem, scenario.status, "application/problem+json"));
+      const parameters = scenario.method === "POST" ? { id: OPERATION_A, type: "complete-task", parameters: {} } : {};
+      const reply = await env.send(rpc(scenario.operation, scenario.target, parameters, requestId), sender(env));
 
-  assert.equal(env.requests.length, 1);
-  assert.equal(env.notificationCalls.length, 0);
-  assert.equal(env.localData[STATUS_KEY].error.kind, "timeout");
-});
-
-test("alarm ignores foreign names and stays inert when disconnected", async () => {
-  const env = bootBackground({ initialStorage: { [SETTINGS_KEY]: activeSettings({ monitorEnabled: false }) } });
-  env.fireAlarm("some-other-extension-alarm");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.requests.length, 0);
-  assert.equal(env.notificationCalls.length, 0);
-
-  env.fireAlarm(ALARM);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.requests.length, 0);
-});
-
-test("a second alarm received during a monitor cycle is ignored without overlapping fetches", async () => {
-  let releaseNotifications;
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async (url) => {
-      if (String(url).includes("/notifications")) {
-        return new Promise((resolve) => { releaseNotifications = () => resolve(json([])); });
-      }
-      return json(agenda());
-    },
-  });
-  env.fireAlarm(ALARM);
-  await waitFor(() => env.requests.length === 1, "first monitor notification fetch");
-  env.fireAlarm(ALARM);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.requests.length, 1);
-  releaseNotifications();
-  await waitFor(() => Boolean(env.localData[STATUS_KEY]), "first monitor completion");
-  assert.equal(env.requests.filter((request) => request.url.includes("/notifications?")).length, 1);
-  assert.equal(env.requests.filter((request) => request.url.endsWith("/agenda")).length, 1);
-});
-
-test("alarm reconciliation creates separate five-minute monitor and urgency alarms", async () => {
-  const env = bootBackground({ fetch: async () => json(agenda()) });
-  await waitFor(() => env.alarmCreates.length === 2, "initial background alarms");
-  const monitorAlarm = env.alarmCreates.find((alarm) => alarm.name === ALARM);
-  const urgencyAlarm = env.alarmCreates.find((alarm) => alarm.name === URGENCY_ALARM);
-  assert.ok(monitorAlarm);
-  assert.ok(urgencyAlarm);
-  for (const alarm of [monitorAlarm, urgencyAlarm]) {
-    assert.equal(alarm.info.periodInMinutes, 5);
-    assert.equal(alarm.info.delayInMinutes, 5);
+      assert.equal(reply.ok, false);
+      assert.equal(reply.status, scenario.status);
+      assert.equal(reply.error.kind, scenario.expectedKind);
+      assert.equal(reply.error.effectsState, undefined);
+      if (scenario.method === "POST") assert.equal(reply.error.operationId, OPERATION_A);
+    });
   }
-
-  const scheduledTime = env.alarmData.get(ALARM).scheduledTime;
-  const urgencyScheduledTime = env.alarmData.get(URGENCY_ALARM).scheduledTime;
-  env.events.installed.fire({ reason: "update" });
-  env.events.startup.fire();
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.alarmCreates.length, 2);
-  assert.equal(env.alarmData.get(ALARM).scheduledTime, scheduledTime);
-  assert.equal(env.alarmData.get(URGENCY_ALARM).scheduledTime, urgencyScheduledTime);
-  assert.equal(env.requests.length, 0, "reconciling an alarm does not start an immediate monitor request");
 });
 
-test("a stale task connection cannot overwrite settings saved while its probe is in flight", async () => {
-  let releaseProbe;
-  const env = bootBackground({
-    fetch: async () => new Promise((resolve) => { releaseProbe = () => resolve(json(agenda())); }),
-  });
-  const connect = env.send({
-    type: "settings.connect",
-    requestId: "connect-old",
-    settings: activeSettings({ serverUrl: "http://old.example.test/base", token: "old-token", monitorEnabled: true }),
-  });
-  await waitFor(() => env.requests.length === 1, "old settings probe");
-  const saved = plain(await env.send({
-    type: "settings.save",
-    requestId: "save-new",
-    settings: activeSettings({ serverUrl: "http://new.example.test/base", token: "new-token", monitorEnabled: true }),
-    args: {},
-  }));
-  assert.equal(saved.ok, true);
-  releaseProbe();
-  const result = plain(await connect);
+test("HTTP problem details preserve the actual status and sanitize a leaked credential", async () => {
+  const token = "credential-value-for-test";
+  const env = boot(async () => response({
+    type: "about:blank",
+    title: "Error",
+    status: 503,
+    detail: `Bearer ${token} failed at https://internal.example/private/path`,
+    code: "service-unavailable",
+    effectsState: "none",
+  }, 503), { settings: { token } });
+  const reply = await env.send(rpc("root.read"), sender(env));
 
-  assert.equal(result.ok, false);
-  assert.equal(env.localData[SETTINGS_KEY].serverUrl, "http://new.example.test/base");
-  assert.equal(env.localData[SETTINGS_KEY].token, "new-token");
-  assert.equal(env.localData[SETTINGS_KEY].monitorEnabled, false);
-  assert.equal(env.requests.length, 1);
+  assert.equal(reply.ok, false);
+  assert.equal(reply.status, 503);
+  assert.equal(reply.error.kind, "http");
+  assert.equal(reply.error.effectsState, "none");
+  assert.doesNotMatch(JSON.stringify(reply), new RegExp(token));
+  assert.doesNotMatch(JSON.stringify(env.localData[ERROR_KEY]), new RegExp(token));
+  assert.doesNotMatch(JSON.stringify(env.localData[ERROR_KEY]), /internal\.example|private\/path/);
+  assert.equal(env.badgeState.text, "!");
 });
 
-test("disconnect prevents already queued operations from starting new fetches", async () => {
-  let releaseFirst;
-  const env = bootBackground({
-    initialStorage: { [SETTINGS_KEY]: activeSettings() },
-    fetch: async () => new Promise((resolve) => { releaseFirst = () => resolve(json(agenda())); }),
-  });
-  const first = env.send({ type: "gateway.call", requestId: "first", operation: "GET_AGENDA", args: {} });
-  await waitFor(() => env.requests.length === 1, "first request");
-  const queued = env.send({ type: "gateway.call", requestId: "queued", operation: "GET_AGENDA", args: {} });
-  const disconnected = plain(await env.send({ type: "settings.disconnect", requestId: "disconnect", args: {} }));
-  assert.equal(disconnected.ok, true);
-  releaseFirst();
-  const [firstReply, queuedReply] = await Promise.all([first, queued]);
-
-  assert.equal(plain(firstReply).ok, true, "an already-started request may complete");
-  assert.equal(plain(queuedReply).ok, false);
-  assert.equal(env.requests.length, 1, "disconnected work in the queue does not start a new request");
-  assert.equal(env.localData[SETTINGS_KEY].monitorEnabled, false);
-});
-
-test("invalid configuration disables an active monitor and the error never exposes the token", async () => {
-  const env = bootBackground({ initialStorage: { [SETTINGS_KEY]: activeSettings() } });
-  const result = plain(await env.send({
-    type: "settings.save",
-    requestId: "bad-url",
-    settings: activeSettings({ serverUrl: "/api", monitorEnabled: true }),
-    args: {},
-  }));
-
-  assert.equal(result.ok, false);
-  assert.equal(env.localData[SETTINGS_KEY].monitorEnabled, false);
-  assert.equal(JSON.stringify(result).includes("test-bearer-token"), false);
-  const gateway = plain(await env.send({ type: "gateway.call", requestId: "after-invalid", operation: "GET_AGENDA", args: {} }));
-  assert.equal(gateway.ok, false);
+test("the retired notification alarm remains inert; notification reads are safe GETs without cursors or ACK flags", async () => {
+  const env = boot(async () => response(rootResource({ _embedded: { notifications: [] } })));
+  env.fireAlarm("eptask-notification-monitor");
+  await idle();
   assert.equal(env.requests.length, 0);
+
+  const reply = await env.send(rpc("notifications.read"), sender(env));
+  assert.equal(reply.ok, true);
+  assert.equal(new URL(env.requests[0].url).pathname, "/prefix/api/v1/notifications");
+  assert.equal(new URL(env.requests[0].url).search, "");
+  assert.equal(env.requests[0].init.method, "GET");
+  assert.equal(env.requests[0].init.body, undefined);
+});
+
+test("the timeout covers response body consumption and returns no invented HTTP status", async () => {
+  const env = boot(async (_url, init) => ({
+    ok: true,
+    status: 200,
+    text: () => new Promise((_resolve, reject) => {
+      if (init.signal.aborted) reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      else init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    }),
+  }), { settings: { timeoutMs: 1000 } });
+  const reply = await env.send(rpc("root.read"), sender(env));
+
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.kind, "timeout");
+  assert.equal(reply.status, null);
+  assert.equal(env.requests.length, 1);
+  assert.equal(env.requests[0].init.signal.aborted, true);
+});
+
+test("a late read after disconnect and reconfiguration cannot restore stale UI state or erase a newer error", async () => {
+  const newBase = "https://replacement.example.test:9443/next/api/v1";
+  const newHostPermission = "https://replacement.example.test/*";
+  let releaseOldRead;
+  const env = boot(async (url) => {
+    if (url === `${BASE}/tasks`) {
+      return new Promise((resolve) => { releaseOldRead = () => resolve(response({ tasks: [] })); });
+    }
+    if (url === "https://replacement.example.test:9443/next/api/v1") {
+      return response({ _links: { self: { href: newBase } } });
+    }
+    if (url === `${newBase}/tasks`) {
+      return response({ code: "service-unavailable", title: "Unavailable", detail: "Try later" }, 503, "application/problem+json");
+    }
+    throw new Error("unexpected test URL");
+  }, {
+    initialPermissions: [HOST_PERMISSION, newHostPermission],
+  });
+  const oldRead = env.send(rpc("tasks.list", null, {}), sender(env));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(env.requests.length, 1);
+
+  const disconnected = await env.send(rpc("settings.disconnect", null, {}), sender(env, "options.html", env.extensionId));
+  assert.equal(disconnected.ok, true);
+  const connected = await env.send(rpc("settings.connect", null, {
+    serverUrl: newBase,
+    token: "replacement-token",
+    monitorEnabled: true,
+    timeoutMs: 30000,
+  }, REQUEST_B), sender(env, "options.html", env.extensionId));
+  assert.equal(connected.ok, true);
+
+  const newFailure = await env.send(rpc("tasks.list", null, {}, OPERATION_A), sender(env));
+  assert.equal(newFailure.ok, false);
+  assert.equal(newFailure.status, 503);
+  assert.equal(env.localData[ERROR_KEY].requestId, OPERATION_A);
+  assert.equal(env.badgeState.text, "!");
+
+  releaseOldRead();
+  const lateReply = await oldRead;
+  assert.equal(lateReply.ok, true);
+  assert.equal(env.localData[ERROR_KEY].requestId, OPERATION_A);
+  assert.equal(env.badgeState.text, "!");
+  assert.equal(env.localData[SETTINGS_KEY].serverUrl, newBase);
 });
