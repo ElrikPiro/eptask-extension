@@ -10,6 +10,18 @@ En Firefox, copia `manifest.firefox.json` sobre `manifest.json`, abre `about:deb
 
 Al cambiar de navegador, copia la variante correspondiente al `manifest.json` antes de cargar o recargar la carpeta. Chromium usa un service worker y Firefox scripts de background. La suite automatizada cubre las APIs con dobles locales y Node; todavía no valida en una instalación nativa de Firefox o Chromium los diálogos de permisos ni sus almacenes de certificados.
 
+## Preparar paquetes
+
+Desde la raíz del repositorio de la extensión, ejecuta **node scripts/package-extension.mjs**.
+
+El proceso comprueba que los manifests completos coincidan salvo el background propio de cada navegador, valida CSP y permisos, revisa referencias a recursos locales y excluye pruebas y archivos de desarrollo. Genera **extension/dist/chromium-unpacked/** y **chromium.zip**, además de **firefox-unpacked/** y **firefox-unsigned.xpi**. Ambos paquetes usan las mismas fuentes y assets; solo cambia el manifest de destino. **package-report.json** registra las verificaciones y los bloqueos de entrega; **SHA256SUMS** contiene los hashes de los archivos comprimidos, el informe y cada archivo de las dos carpetas desempaquetadas. El ZIP y XPI se generan de forma determinista. La carpeta **dist/** es temporal y no se versiona.
+
+Las carpetas desempaquetadas sirven para carga manual de desarrollo. **firefox-unsigned.xpi** es un candidato para el proceso de Mozilla y no se puede instalar en Firefox estable sin firma. El flujo **Package browser extensions** ejecuta la suite de extensión y las comprobaciones del empaquetador en cada cambio. La prueba HTTPS contra el backend real requiere su checkout y entorno de pruebas contiguos; en el repositorio aislado informa un skip explícito, así que ese flujo de paquetes no acredita esa integración. Solo una ejecución manual con **Submit the Firefox package to Mozilla for unlisted signing** habilitado envía la extensión a Mozilla para obtener una firma de distribución directa.
+
+Antes de solicitar firma Firefox, configura en el repositorio las variables **FIREFOX_ADDON_ID** y **FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON**, y los secretos **WEB_EXT_API_KEY** y **WEB_EXT_API_SECRET**. La declaración JSON tiene las claves **required** y **optional**, según la [clasificación de datos de Firefox](https://extensionworkshop.com/documentation/develop/firefox-builtin-data-consent/). Clasifica el tráfico real de la extensión antes de establecerla; el builder no elige estas categorías por ti. La identidad y clasificación pueden incluirse en el manifest Firefox o proporcionarse mediante variables de CI; el paso de firma se detiene si falta cualquiera de las dos. La firma sin listar usa [Mozilla web-ext](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/) y no publica una ficha pública. No se han suministrado credenciales ni se ha enviado un paquete para firma.
+
+El archivo **chromium.zip** es un paquete para un canal admitido, no un instalador persistente universal. Una distribución no listada en Chrome Web Store es una opción posible cuando se confirme que esa tienda sirve a los navegadores de destino; se aplican su [revisión y sus políticas](https://developer.chrome.com/docs/webstore/cws-dashboard-distribution/). La tienda, la identidad estable de Chromium y su disponibilidad para cada distribución siguen pendientes de verificación.
+
 ## Conexión segura
 
 En **Configuración**, introduce una dirección HTTPS del servidor, un token Bearer y un tiempo de espera. La extensión normaliza la ruta para usar `/api/v1`. Rechaza direcciones HTTP, credenciales en la URL, consultas, fragmentos, segmentos codificados que cambien la ruta y prefijos duplicados.

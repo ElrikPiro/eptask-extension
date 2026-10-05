@@ -1,0 +1,119 @@
+name: Package browser extensions
+
+on:
+  push:
+    paths:
+      - ".github/workflows/package-extension.yml"
+      - "extension/**"
+      - "scripts/package-extension.mjs"
+      - "tests/package-builder.test.cjs"
+  pull_request:
+    paths:
+      - ".github/workflows/package-extension.yml"
+      - "extension/**"
+      - "scripts/package-extension.mjs"
+      - "tests/package-builder.test.cjs"
+  workflow_dispatch:
+    inputs:
+      sign_firefox:
+        description: Submit the Firefox package to Mozilla for unlisted signing
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out extension sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22.23.3
+
+      # The real-backend test reports a skip unless a backend checkout and test environment are supplied beside this standalone repository.
+      - name: Run extension test suite
+        working-directory: extension
+        run: node --test tests/*.test.cjs
+
+      - name: Run package builder checks
+        run: node --test tests/package-builder.test.cjs
+
+      - name: Build browser folders and archives
+        working-directory: .
+        env:
+          FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
+          FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON: ${{ vars.FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON }}
+        run: node scripts/package-extension.mjs
+
+      - name: Verify archive reproducibility
+        working-directory: .
+        env:
+          FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
+          FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON: ${{ vars.FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON }}
+        run: |
+          sha256sum extension/dist/chromium.zip extension/dist/firefox-unsigned.xpi > "$RUNNER_TEMP/extension-archive-checksums"
+          node scripts/package-extension.mjs
+          sha256sum --check "$RUNNER_TEMP/extension-archive-checksums"
+
+      - name: Check Firefox signing configuration
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_firefox
+        working-directory: .
+        env:
+          FIREFOX_ADDON_ID: ${{ vars.FIREFOX_ADDON_ID }}
+          FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON: ${{ vars.FIREFOX_DATA_COLLECTION_PERMISSIONS_JSON }}
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: |
+          if [ -z "$WEB_EXT_API_KEY" ] || [ -z "$WEB_EXT_API_SECRET" ]; then
+            echo "Configure WEB_EXT_API_KEY and WEB_EXT_API_SECRET as repository secrets before requesting signing."
+            exit 1
+          fi
+          node --input-type=module -e "import fs from 'node:fs'; const r = JSON.parse(fs.readFileSync('extension/dist/package-report.json', 'utf8')); if (!r.firefoxSigning.readyForMozillaSigning) { console.error(r.firefoxSigning.blockers.join('\\n')); process.exit(1); }"
+
+      - name: Install pinned Firefox signing tool
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_firefox
+        run: npm install --global web-ext@10.5.0
+
+      - name: Submit Firefox extension for unlisted signing
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_firefox
+        working-directory: .
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: |
+          web-ext sign \
+            --source-dir extension/dist/firefox-unpacked \
+            --artifacts-dir extension/dist/signed \
+            --channel unlisted
+
+      - name: Record signed package hashes
+        if: github.event_name == 'workflow_dispatch' && inputs.sign_firefox
+        run: |
+          cd extension/dist/signed
+          mapfile -d '' signed_packages < <(find . -type f -name '*.xpi' -print0 | sort -z)
+          if [ "${#signed_packages[@]}" -eq 0 ]; then
+            echo "Mozilla signing did not produce an XPI artifact."
+            exit 1
+          fi
+          sha256sum "${signed_packages[@]}" > SHA256SUMS
+
+      - name: Upload browser packages
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: browser-extension-packages-${{ github.run_id }}
+          path: |
+            extension/dist/chromium-unpacked/
+            extension/dist/chromium.zip
+            extension/dist/firefox-unpacked/
+            extension/dist/firefox-unsigned.xpi
+            extension/dist/package-report.json
+            extension/dist/SHA256SUMS
+            extension/dist/signed/
+          if-no-files-found: error
+          include-hidden-files: false
