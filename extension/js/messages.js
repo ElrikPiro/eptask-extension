@@ -324,6 +324,8 @@ export const settingsMessages = Object.freeze({
 
 export const clearNotificationBuffer = () => sendRequest("notifications.clear-local", null, {});
 
+export const openManagerPage = () => sendRequest("manager.open", null, {});
+
 export function assertSuccessfulReply(reply) {
   if (reply?.ok === true) return reply;
   const error = reply?.error && typeof reply.error === "object" ? reply.error : {};

@@ -24,6 +24,8 @@ La conexión comprueba que el servidor responde con el recurso HAL raíz esperad
 
 El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de volver a consultar la agenda y comprobar el ID mostrado. Si cambia la conexión mientras esa consulta está en curso, no envía la operación al nuevo destino. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
 
+El botón **Abrir gestor** reutiliza la pestaña del gestor de esta extensión que se haya usado más recientemente. Si esa pestaña está en una ventana minimizada, la restaura y le devuelve el foco. Si no hay una pestaña válida, abre una nueva. Las páginas externas y las pestañas de esta extensión con otra ruta, consulta o fragmento no cuentan como gestor. El orden de uso se guarda en el perfil local y se reconcilia cuando se inicia el background; si no puede reconstruirse, se prioriza la pestaña activa de la ventana actualmente enfocada. Sin una ventana enfocada, se elige primero el ID de pestaña menor. La operación no cambia la selección de tarea ni la copia de avisos.
+
 ## Avisos y copia local
 
 El background lee el historial de avisos mediante `GET` con una alarma cada cinco minutos. Valida la identidad del historial, los números de secuencia, las marcas de tiempo y los límites de retención antes de guardar la respuesta en el almacenamiento local de ese perfil. La identidad de cada aviso combina el ID del historial y su secuencia, por lo que dos avisos con el mismo texto siguen siendo distintos. El background guarda las entradas y el cursor antes de mostrar una notificación nativa; los avisos nuevos de un ciclo se agrupan en una sola alerta.

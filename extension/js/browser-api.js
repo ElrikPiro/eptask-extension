@@ -56,9 +56,6 @@ export const browserApi = Object.freeze({
     openOptionsPage: () => invoke(namespace.runtime, "openOptionsPage"),
     getURL: (path) => namespace.runtime.getURL(path),
   }),
-  tabs: Object.freeze({
-    create: (properties) => invoke(namespace.tabs, "create", [properties]),
-  }),
   permissions: Object.freeze({
     request: (details) => invoke(namespace.permissions, "request", [details]),
     contains: (details) => invoke(namespace.permissions, "contains", [details]),

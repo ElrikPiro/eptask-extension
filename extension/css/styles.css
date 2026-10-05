@@ -198,6 +198,8 @@ pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(
 .popup-task-actions button { width: 100%; min-height: 2.65rem; }
 .popup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
 .popup-actions button { width: 100%; }
+.manager-open-status { margin-top: -0.35rem; }
+.manager-open-status[hidden] { display: none; }
 .popup-notifications { display: grid; gap: 0.4rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .popup-notifications .panel-header { align-items: center; }
 .popup-notifications h2 { margin: 0; font-size: 0.96rem; }

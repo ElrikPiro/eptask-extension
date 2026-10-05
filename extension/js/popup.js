@@ -1,5 +1,5 @@
 import { browserApi } from "./browser-api.js";
-import { clearNotificationBuffer, gatewayCall, readGateway, assertSuccessfulReply, subscribeChanges } from "./messages.js";
+import { clearNotificationBuffer, gatewayCall, openManagerPage, readGateway, assertSuccessfulReply, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
 import { node, renderNotificationHistory } from "./render.js";
 
@@ -7,6 +7,7 @@ const status = document.querySelector("#popup-status");
 const taskCard = document.querySelector("#urgent-task");
 const openOptions = document.querySelector("#open-options");
 const openManager = document.querySelector("#open-manager");
+const managerOpenStatus = document.querySelector("#manager-open-status");
 const refreshButton = document.querySelector("#refresh-agenda");
 const completeButton = document.querySelector("#complete-task");
 const snoozeButton = document.querySelector("#snooze-task");
@@ -49,6 +50,9 @@ let needsRefreshBeforeAction = false;
 let currentAgendaQuery = null;
 let historyClearPending = false;
 let localReadSequence = 0;
+let managerOpening = false;
+let managerOpenState = "";
+let managerOpenMessage = "";
 
 function settingsAreReady() {
   return stateLoaded && isReady(extensionState?.settings);
@@ -63,6 +67,14 @@ function updateControls() {
   snoozeButton.disabled = !canAct;
   const hasLocalEntries = Boolean(extensionState?.notificationReception?.buffer?.length || extensionState?.history?.length);
   clearNotificationsButton.disabled = historyClearPending || !hasLocalEntries;
+  openManager.disabled = managerOpening;
+  openManager.textContent = managerOpening ? "Abriendo…" : managerOpenState === "error" ? "Reintentar" : "Abrir gestor";
+  openManager.setAttribute("aria-busy", managerOpening ? "true" : "false");
+  managerOpenStatus.hidden = !managerOpenMessage;
+  managerOpenStatus.textContent = managerOpenMessage;
+  managerOpenStatus.className = `status-line manager-open-status${managerOpenState === "error" ? " error-text" : managerOpenState === "opened" ? " online-text" : ""}`;
+  if (managerOpenState) managerOpenStatus.setAttribute("data-state", managerOpenState);
+  else managerOpenStatus.removeAttribute("data-state");
 }
 
 function renderLocalNotifications() {
@@ -136,6 +148,32 @@ async function clearLocalNotifications() {
 function setStatus(message, kind = "") {
   status.textContent = message;
   status.className = `status-line ${kind}`.trim();
+}
+
+async function performManagerOpen() {
+  if (managerOpening) return;
+  managerOpening = true;
+  managerOpenState = "opening";
+  managerOpenMessage = "Abriendo el gestor…";
+  updateControls();
+  try {
+    const reply = assertSuccessfulReply(await openManagerPage());
+    if (reply.data?.opened !== true || typeof reply.data?.reused !== "boolean") {
+      throw Object.assign(new Error("Invalid manager-open response"), {kind: "invalid-response"});
+    }
+    managerOpenState = "opened";
+    managerOpenMessage = reply.data.reused
+      ? "Se activó el gestor que ya estaba abierto."
+      : "Se abrió el gestor en una pestaña nueva.";
+  } catch (error) {
+    managerOpenState = "error";
+    managerOpenMessage = error?.kind === "unsupported-operation"
+      ? SAFE_ERRORS["unsupported-operation"]
+      : "No se pudo abrir el gestor. Inténtalo de nuevo.";
+  } finally {
+    managerOpening = false;
+    updateControls();
+  }
 }
 
 function safeErrorMessage(error) {
@@ -386,7 +424,7 @@ openOptions.addEventListener("click", () => {
   void browserApi.runtime.openOptionsPage();
 });
 openManager.addEventListener("click", () => {
-  void browserApi.tabs.create({ url: browserApi.runtime.getURL("index.html") });
+  void performManagerOpen();
 });
 refreshButton.addEventListener("click", () => {
   if (refreshButton.disabled) return;

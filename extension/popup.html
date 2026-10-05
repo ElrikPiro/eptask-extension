@@ -28,8 +28,9 @@
       </div>
       <div class="popup-actions">
         <button id="refresh-agenda" type="button" class="secondary" disabled>Actualizar</button>
-        <button id="open-manager" type="button">Abrir gestor</button>
+        <button id="open-manager" type="button" aria-describedby="manager-open-status">Abrir gestor</button>
       </div>
+      <p id="manager-open-status" class="status-line manager-open-status" role="status" aria-live="polite" hidden></p>
       <section class="popup-notifications" aria-labelledby="popup-notifications-title">
         <div class="panel-header">
           <h2 id="popup-notifications-title">Avisos guardados</h2>

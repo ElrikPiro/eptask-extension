@@ -38,7 +38,7 @@ function response(body, status = 200, contentType = "application/json") {
   };
 }
 
-function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test", extensionOrigin, initialPermissions = [], permissionRequestResult = true, permissionContains, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
+function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrikpiro-extension@test", extensionOrigin, initialPermissions = [], permissionRequestResult = true, permissionContains, supportsBadgeTextColor = true, failBadgeTextColor = false, initialTabs = [], initialWindows = [{ id: 1, focused: true, state: "normal" }] } = {}) {
   const changes = createEvent();
   const localData = clone(initialStorage) || {};
   const allowedPermissions = new Set(initialPermissions);
@@ -51,6 +51,8 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
   const runtimeMessages = [];
   const badgeState = { text: "", textColor: null, backgroundColor: null, title: "ElrikPiro" };
   const actionCalls = [];
+  const tabCalls = [];
+  const windowCalls = [];
   const extensionBase = extensionOrigin || (mode === "browser"
     ? "moz-extension://a1b2c3d4-e5f6-4789-8abc-1234567890ab"
     : `chrome-extension://${extensionId}`);
@@ -185,8 +187,107 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
     };
   }
 
+  const tabsState = clone(initialTabs) || [];
+  const windowsState = clone(initialWindows) || [];
+  const tabEvents = {
+    onActivated: createEvent(),
+    onUpdated: createEvent(),
+    onRemoved: createEvent(),
+    onCreated: createEvent(),
+  };
+  const windowEvents = { onFocusChanged: createEvent(), onRemoved: createEvent() };
+  const focusedWindow = () => windowsState.find((window) => window.focused) || windowsState[0];
+  const nextTabId = () => Math.max(0, ...tabsState.map((tab) => Number.isInteger(tab.id) ? tab.id : 0)) + 1;
   const tabs = {
-    create: callbackMethod(async (properties) => ({ id: 1, ...properties }), mode),
+    ...tabEvents,
+    query: callbackMethod(async (queryInfo = {}) => {
+      tabCalls.push({ method: "query", queryInfo: clone(queryInfo) });
+      timeline.push({ type: "tabs.query", queryInfo: clone(queryInfo) });
+      return tabsState.filter((tab) => {
+        if (queryInfo.windowId !== undefined && tab.windowId !== queryInfo.windowId) return false;
+        if (queryInfo.active !== undefined && tab.active !== queryInfo.active) return false;
+        if (queryInfo.url !== undefined) {
+          const patterns = Array.isArray(queryInfo.url) ? queryInfo.url : [queryInfo.url];
+          if (!patterns.some((pattern) => {
+            const escaped = String(pattern).split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+            return new RegExp(`^${escaped}$`).test(tab.url || "");
+          })) return false;
+        }
+        return true;
+      }).map(clone);
+    }, mode),
+    get: callbackMethod(async (tabId) => {
+      tabCalls.push({ method: "get", tabId });
+      timeline.push({ type: "tabs.get", tabId });
+      return clone(tabsState.find((tab) => tab.id === tabId) || null);
+    }, mode),
+    update: callbackMethod(async (tabId, properties = {}) => {
+      tabCalls.push({ method: "update", tabId, properties: clone(properties) });
+      timeline.push({ type: "tabs.update", tabId, properties: clone(properties) });
+      const tab = tabsState.find((item) => item.id === tabId);
+      if (!tab) return null;
+      if (properties.active === true) {
+        for (const item of tabsState) if (item.windowId === tab.windowId) item.active = item.id === tab.id;
+      }
+      Object.assign(tab, clone(properties));
+      tabEvents.onUpdated.fire(tabId, clone(properties), clone(tab));
+      if (properties.active === true) tabEvents.onActivated.fire({ tabId, windowId: tab.windowId });
+      return clone(tab);
+    }, mode),
+    create: callbackMethod(async (properties = {}) => {
+      const window = windowsState.find((item) => item.id === properties.windowId) || focusedWindow();
+      const windowId = properties.windowId ?? window?.id ?? 1;
+      const tab = { id: nextTabId(), windowId, active: properties.active !== false, ...clone(properties) };
+      if (tab.active) for (const item of tabsState) if (item.windowId === windowId) item.active = false;
+      tabsState.push(tab);
+      tabCalls.push({ method: "create", properties: clone(properties), result: clone(tab) });
+      timeline.push({ type: "tabs.create", properties: clone(properties), result: clone(tab) });
+      tabEvents.onCreated.fire(clone(tab));
+      if (tab.active) tabEvents.onActivated.fire({ tabId: tab.id, windowId });
+      return clone(tab);
+    }, mode),
+  };
+  const windows = {
+    ...windowEvents,
+    get: callbackMethod(async (windowId, getInfo = {}) => {
+      windowCalls.push({ method: "get", windowId, getInfo: clone(getInfo) });
+      timeline.push({ type: "windows.get", windowId, getInfo: clone(getInfo) });
+      const window = windowsState.find((item) => item.id === windowId);
+      if (!window) return null;
+      const result = clone(window);
+      if (getInfo.populate) result.tabs = tabsState.filter((tab) => tab.windowId === windowId).map(clone);
+      return result;
+    }, mode),
+    getAll: callbackMethod(async (getInfo = {}) => {
+      windowCalls.push({ method: "getAll", getInfo: clone(getInfo) });
+      timeline.push({ type: "windows.getAll", getInfo: clone(getInfo) });
+      return windowsState.map((window) => {
+        const result = clone(window);
+        if (getInfo.populate) result.tabs = tabsState.filter((tab) => tab.windowId === window.id).map(clone);
+        return result;
+      });
+    }, mode),
+    getLastFocused: callbackMethod(async (getInfo = {}) => {
+      windowCalls.push({ method: "getLastFocused", getInfo: clone(getInfo) });
+      timeline.push({ type: "windows.getLastFocused", getInfo: clone(getInfo) });
+      const window = focusedWindow();
+      if (!window) return null;
+      const result = clone(window);
+      if (getInfo.populate) result.tabs = tabsState.filter((tab) => tab.windowId === window.id).map(clone);
+      return result;
+    }, mode),
+    update: callbackMethod(async (windowId, properties = {}) => {
+      windowCalls.push({ method: "update", windowId, properties: clone(properties) });
+      timeline.push({ type: "windows.update", windowId, properties: clone(properties) });
+      const window = windowsState.find((item) => item.id === windowId);
+      if (!window) return null;
+      if (properties.focused === true) {
+        for (const item of windowsState) item.focused = item.id === windowId;
+      }
+      Object.assign(window, clone(properties));
+      windowEvents.onFocusChanged.fire(window.focused ? windowId : -1);
+      return clone(window);
+    }, mode),
   };
 
   const permissions = {
@@ -224,7 +325,7 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
   };
 
   return {
-    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs, action, permissions },
+    namespace: { runtime, storage: { local, onChanged: changes }, alarms, notifications, tabs, windows, action, permissions },
     localData,
     storageWrites,
     timeline,
@@ -234,9 +335,28 @@ function createApi({ mode = "browser", initialStorage = {}, extensionId = "elrik
     badgeState,
     actionCalls,
     permissionCalls,
+    tabCalls,
+    windowCalls,
     runtimeMessages,
     allowedPermissions,
-    events: { changes, runtime: runtime.onMessage, installed: runtime.onInstalled, startup: runtime.onStartup, alarm: alarms.onAlarm },
+    tabsState,
+    windowsState,
+    events: { changes, runtime: runtime.onMessage, installed: runtime.onInstalled, startup: runtime.onStartup, alarm: alarms.onAlarm, tabActivated: tabEvents.onActivated, tabUpdated: tabEvents.onUpdated, tabRemoved: tabEvents.onRemoved, tabCreated: tabEvents.onCreated, windowFocusChanged: windowEvents.onFocusChanged, windowRemoved: windowEvents.onRemoved },
+    removeTab(tabId) {
+      const index = tabsState.findIndex((tab) => tab.id === tabId);
+      if (index < 0) return false;
+      const [removed] = tabsState.splice(index, 1);
+      tabEvents.onRemoved.fire(tabId, { windowId: removed.windowId, isWindowClosing: false });
+      return true;
+    },
+    navigateTab(tabId, url) {
+      const tab = tabsState.find((item) => item.id === tabId);
+      if (!tab) return false;
+      const changeInfo = { url };
+      tab.url = url;
+      tabEvents.onUpdated.fire(tabId, changeInfo, clone(tab));
+      return true;
+    },
     extensionId,
     extensionOrigin: extensionBase,
   };
@@ -252,8 +372,8 @@ function callbackMethod(implementation, mode) {
   };
 }
 
-function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride, extensionId, extensionOrigin, initialPermissions = [], permissionRequestResult = true, permissionContains, supportsBadgeTextColor = true, failBadgeTextColor = false } = {}) {
-  const api = createApi({ mode, initialStorage, extensionId, extensionOrigin, initialPermissions, permissionRequestResult, permissionContains, supportsBadgeTextColor, failBadgeTextColor });
+function bootBackground({ mode = "browser", initialStorage, fetch, timers = globalThis, console: consoleOverride, extensionId, extensionOrigin, initialPermissions = [], permissionRequestResult = true, permissionContains, supportsBadgeTextColor = true, failBadgeTextColor = false, initialTabs = [], initialWindows } = {}) {
+  const api = createApi({ mode, initialStorage, extensionId, extensionOrigin, initialPermissions, permissionRequestResult, permissionContains, supportsBadgeTextColor, failBadgeTextColor, initialTabs, ...(initialWindows ? { initialWindows } : {}) });
   const requests = [];
   const fetcher = fetch || (async () => response({}));
   const recordedFetch = async (url, init) => {

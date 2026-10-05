@@ -17,11 +17,15 @@ globalThis.__popupTest = {
     agendaLoading,
     activeAction,
     needsRefreshBeforeAction,
+    managerOpening,
+    managerOpenState,
+    managerOpenMessage,
     notificationReception: extensionState?.notificationReception,
     notificationError: extensionState?.notificationError,
   }),
   refreshUrgentTask,
   performTaskAction,
+  performManagerOpen,
 };
 `;
 const renderSource = fs.readFileSync(renderPath, "utf8")
@@ -134,11 +138,11 @@ class FakeElement {
   }
 }
 
-function bootPopup({ initialSettings = readySettings(), initialState, initialStatePromise, respond, serverTimeZone = "Europe/Madrid" } = {}) {
+function bootPopup({ initialSettings = readySettings(), initialState, initialStatePromise, respond, managerOpen, serverTimeZone = "Europe/Madrid" } = {}) {
   const selectors = [
     "#popup-status", "#urgent-task", "#open-options", "#open-manager",
     "#refresh-agenda", "#complete-task", "#snooze-task", "#popup-error-badge",
-    "#popup-notification-list", "#popup-notification-monitor-status", "#popup-notification-continuity", "#popup-clear-history",
+    "#popup-notification-list", "#popup-notification-monitor-status", "#popup-notification-continuity", "#popup-clear-history", "#manager-open-status",
   ];
   const elements = new Map(selectors.map((selector) => [selector, new FakeElement() ]));
   for (const selector of ["#refresh-agenda", "#complete-task", "#snooze-task"]) {
@@ -195,6 +199,10 @@ function bootPopup({ initialSettings = readySettings(), initialState, initialSta
         if (response !== undefined) return response;
       }
       return Promise.resolve(success({}));
+    },
+    openManagerPage() {
+      calls.push({ operation: "manager.open", target: null, parameters: {} });
+      return managerOpen ? managerOpen(calls) : Promise.resolve(success({ opened: true, reused: true }));
     },
     subscribeChanges(listener) {
       changeListener = listener;
@@ -629,6 +637,84 @@ test("the popup shows a real HTTP status and clears its badge after a successful
   await waitFor(() => !env.state().agendaLoading && badge.hidden, "successful refresh to clear badge");
   assert.equal(badge.title, "");
   assert.equal(badge.attributes.has("aria-label"), false);
+});
+
+test("opening the manager reports a safe accessible status without changing popup task or history", async () => {
+  const opening = deferred();
+  let attempts = 0;
+  const token = "private-manager-error-token";
+  const env = bootPopup({
+    initialState: {
+      settings: readySettings(),
+      history: [],
+      notificationReception: null,
+      notificationError: "",
+      gatewayError: null,
+    },
+    managerOpen: () => {
+      attempts += 1;
+      return attempts === 1
+        ? Promise.reject(Object.assign(new Error(token), {kind: "network"}))
+        : Promise.resolve(success({opened: true, reused: true}));
+    },
+  });
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "popup ready before manager open");
+
+  const managerButton = env.elements.get("#open-manager");
+  const managerStatus = env.elements.get("#manager-open-status");
+  const popupStatus = env.elements.get("#popup-status").textContent;
+  const taskText = env.elements.get("#urgent-task").textContent;
+  const historyText = env.elements.get("#popup-notification-list").textContent;
+
+  managerButton.click();
+  await waitFor(() => env.state().managerOpenState === "error", "safe manager-open error");
+  assert.equal(managerButton.disabled, false, "the button is available for a retry after failure");
+  assert.equal(managerButton.textContent, "Reintentar");
+  assert.equal(managerStatus.dataset.state, "error");
+  assert.equal(managerStatus.textContent, "No se pudo abrir el gestor. Inténtalo de nuevo.");
+  assert.doesNotMatch(managerStatus.textContent, new RegExp(token));
+  assert.equal(env.elements.get("#popup-status").textContent, popupStatus);
+  assert.equal(env.elements.get("#urgent-task").textContent, taskText);
+  assert.equal(env.elements.get("#popup-notification-list").textContent, historyText);
+
+  managerButton.click();
+  await waitFor(() => env.state().managerOpenState === "opened", "manager-open retry succeeds");
+  assert.equal(attempts, 2);
+  assert.equal(managerStatus.dataset.state, "opened");
+  assert.equal(managerStatus.textContent, "Se activó el gestor que ya estaba abierto.");
+  assert.equal(managerButton.disabled, false);
+  assert.deepEqual(env.calls.filter((call) => call.operation === "manager.open"), [
+    {operation: "manager.open", target: null, parameters: {}},
+    {operation: "manager.open", target: null, parameters: {}},
+  ]);
+});
+
+test("opening the manager disables only its button while the shared open request is pending", async () => {
+  const opening = deferred();
+  let calls = 0;
+  const env = bootPopup({
+    managerOpen: () => {
+      calls += 1;
+      return opening.promise;
+    },
+  });
+  await waitFor(() => env.state().stateLoaded && !env.state().agendaLoading, "popup ready before manager open");
+
+  const managerButton = env.elements.get("#open-manager");
+  managerButton.click();
+  assert.equal(managerButton.disabled, true);
+  assert.equal(env.elements.get("#refresh-agenda").disabled, false);
+  assert.equal(env.elements.get("#complete-task").disabled, false);
+  assert.equal(env.elements.get("#snooze-task").disabled, false);
+  assert.equal(env.elements.get("#manager-open-status").dataset.state, "opening");
+  assert.equal(env.elements.get("#manager-open-status").textContent, "Abriendo el gestor…");
+  managerButton.click();
+  assert.equal(calls, 1, "a pending request cannot be started twice from the popup");
+
+  opening.resolve(success({opened: true, reused: false}));
+  await waitFor(() => env.state().managerOpenState === "opened", "new manager tab opened");
+  assert.equal(managerButton.disabled, false);
+  assert.equal(env.elements.get("#manager-open-status").textContent, "Se abrió el gestor en una pestaña nueva.");
 });
 
 test("notification history is rendered and cleared locally while disconnected", async () => {

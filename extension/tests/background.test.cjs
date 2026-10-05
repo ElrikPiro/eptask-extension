@@ -401,6 +401,41 @@ test("HTTP problem details preserve the actual status and sanitize a leaked cred
   assert.equal(env.badgeState.text, "!");
 });
 
+test("a stale startup badge snapshot cannot clear an HTTP error recorded while restoration is pending", async () => {
+  const env = boot(async () => response({
+    type: "about:blank",
+    title: "Unavailable",
+    status: 503,
+    code: "service-unavailable",
+    detail: "The server is temporarily unavailable.",
+    effectsState: "none",
+  }, 503));
+  const originalGet = env.namespace.storage.local.get;
+  let signalRestoreStarted;
+  const restoreStarted = new Promise((resolve) => { signalRestoreStarted = resolve; });
+  let releaseRestore;
+  const heldRestore = new Promise((resolve) => { releaseRestore = resolve; });
+  env.namespace.storage.local.get = (keys) => {
+    if (Array.isArray(keys) && keys.includes(ERROR_KEY)) {
+      return Promise.resolve(originalGet(keys)).then((snapshot) => {
+        signalRestoreStarted(snapshot);
+        return heldRestore;
+      });
+    }
+    return originalGet(keys);
+  };
+
+  const staleSnapshot = await restoreStarted;
+  const reply = await env.send(rpc("root.read"), sender(env));
+  assert.equal(reply.ok, false);
+  assert.equal(env.badgeState.text, "!", "the request records its error while the older startup read is held");
+
+  releaseRestore(staleSnapshot);
+  await idle();
+  assert.equal(env.badgeState.text, "!", "startup must recheck rather than overwrite a newer stored error");
+  assert.equal(env.localData[ERROR_KEY].kind, "http");
+});
+
 test("the retired notification alarm remains inert; notification reads are safe GETs without cursors or ACK flags", async () => {
   const env = boot(async () => response(rootResource({ _embedded: { notifications: [] } })));
   env.fireAlarm("eptask-notification-monitor");

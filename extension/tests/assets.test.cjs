@@ -57,7 +57,8 @@ test("both source manifests and the active manifest point to local, present reso
 
   for (const manifest of [chromium, firefox, active]) {
     assert.equal(manifest.manifest_version, 3);
-    assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "alarms", "notifications"]));
+    assert.deepEqual(new Set(manifest.permissions), new Set(["storage", "alarms", "notifications", "tabs"]));
+    assert.equal(manifest.permissions.includes("windows"), false, "focus and restore operations use the implicit current-window permission");
     assert.deepEqual(manifest.optional_host_permissions, ["https://*/*"]);
     assert.equal(manifest.host_permissions, undefined);
     assert.equal(manifest.action.default_popup, "popup.html");
@@ -143,6 +144,21 @@ test("popup reads the first agenda task, uses the supported task actions, and ex
   assert.match(popup, /popup-error-badge/);
   assert.match(popup, /kind === "http"/);
   assert.match(popup, /SAFE_ERRORS/);
+});
+
+test("popup requests a shared manager window through the background and reports accessible local status", () => {
+  const popup = read("js/popup.js");
+  const html = read("popup.html");
+  const messages = read("js/messages.js");
+
+  assert.match(html, /id="open-manager"/);
+  assert.match(html, /id="manager-open-status"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(popup, /openManagerPage\(\)/);
+  assert.match(popup, /data-state|setAttribute\("data-state"/);
+  assert.match(popup, /No se pudo abrir el gestor\. Inténtalo de nuevo\./);
+  assert.doesNotMatch(popup, /browserApi\.tabs|tabs\.create\(/);
+  assert.match(messages, /manager\.open/);
+  assert.deepEqual(JSON.parse(read("manifest.json")).permissions.sort(), ["alarms", "notifications", "storage", "tabs"]);
 });
 
 test("legacy manager markup remains local while unsupported commands are retired by the gateway", () => {

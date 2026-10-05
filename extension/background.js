@@ -10,6 +10,7 @@
   const URGENCY_KEY = 'urgentIndicator.v1';
   const RECEPTION_KEY = 'notificationReception.v1';
   const LEGACY_HISTORY_KEY = 'notificationHistory.v1';
+  const MANAGER_RECENCY_KEY = 'managerRecency.v1';
   const LEGACY_MONITOR_ALARM = 'eptask-notification-monitor';
   const URGENCY_ALARM = 'eptask-urgent-indicator';
   const PROTOCOL_VERSION = 1;
@@ -27,14 +28,21 @@
     'root.read', 'tasks.list', 'tasks.get', 'tasks.patch', 'agenda.read', 'statistics.read',
     'events.list', 'strategies.list', 'projects.list', 'projects.get', 'notifications.read',
     'operations.submit', 'operations.get', 'settings.save', 'settings.connect',
-    'settings.disconnect', 'settings.clear', 'history.clear', 'notifications.clear-local',
+    'settings.disconnect', 'settings.clear', 'history.clear', 'notifications.clear-local', 'manager.open',
   ]);
   let monitorBusy = false;
   let alarmReconciliationCount = 0;
   let startupBusy = false;
   let queue = Promise.resolve();
   let receptionQueue = Promise.resolve();
+  let managerStateQueue = Promise.resolve();
+  let managerEventQueue = Promise.resolve();
+  let managerOpenPromise = null;
+  const pendingManagerUses = new Map();
   let currentUrgent = false;
+  let badgeStateVersion = 0;
+  let badgeMutationCount = 0;
+  let badgeWriteQueue = Promise.resolve();
   let configurationRevision = 0;
   let nativeNotificationCounter = 0;
 
@@ -285,6 +293,386 @@
       } catch { fail('gateway-unavailable'); }
       return state;
     });
+  }
+
+  function enqueueManagerState(job) {
+    const result = managerStateQueue.then(job);
+    managerStateQueue = result.catch(() => {});
+    return result;
+  }
+
+  function enqueueManagerEvent(job) {
+    const result = managerEventQueue.then(job);
+    managerEventQueue = result.catch(() => {});
+    return result;
+  }
+
+  function defaultManagerRecency() {
+    return {schemaVersion: 1, nextOrdinal: 1, candidates: []};
+  }
+
+  function validTabId(value) { return Number.isSafeInteger(value) && value >= 0; }
+
+  function normalizeManagerRecency(value) {
+    if (value === undefined || value === null) return defaultManagerRecency();
+    exactKeys(value, ['schemaVersion', 'nextOrdinal', 'candidates'], ['schemaVersion', 'nextOrdinal', 'candidates']);
+    if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.nextOrdinal) || value.nextOrdinal < 1 ||
+        !Array.isArray(value.candidates) || value.candidates.length > 10000) fail('invalid-response');
+    const tabIds = new Set();
+    const ordinals = new Set();
+    const candidates = value.candidates.map(candidate => {
+      exactKeys(candidate, ['tabId', 'windowId', 'ordinal'], ['tabId', 'windowId', 'ordinal']);
+      if (!validTabId(candidate.tabId) || !validTabId(candidate.windowId) || tabIds.has(candidate.tabId) ||
+          !(candidate.ordinal === null || (Number.isSafeInteger(candidate.ordinal) && candidate.ordinal > 0 && candidate.ordinal < value.nextOrdinal)) ||
+          (candidate.ordinal !== null && ordinals.has(candidate.ordinal))) fail('invalid-response');
+      tabIds.add(candidate.tabId);
+      if (candidate.ordinal !== null) ordinals.add(candidate.ordinal);
+      return {tabId: candidate.tabId, windowId: candidate.windowId, ordinal: candidate.ordinal};
+    });
+    candidates.sort((left, right) => left.tabId - right.tabId);
+    return {schemaVersion: 1, nextOrdinal: value.nextOrdinal, candidates};
+  }
+
+  async function readManagerRecency() {
+    let values;
+    try { values = await callApi(native.storage.local, 'get', MANAGER_RECENCY_KEY); }
+    catch { fail('gateway-unavailable'); }
+    return normalizeManagerRecency(values[MANAGER_RECENCY_KEY]);
+  }
+
+  async function saveManagerRecency(state) {
+    try { await callApi(native.storage.local, 'set', {[MANAGER_RECENCY_KEY]: state}); }
+    catch { fail('gateway-unavailable'); }
+  }
+
+  function managerPageUrl() {
+    try {
+      const url = native.runtime.getURL('index.html');
+      if (typeof url !== 'string' || !url || /[?#]/.test(url)) fail('gateway-unavailable');
+      return url;
+    } catch (error) {
+      if (error instanceof GatewayFault) throw error;
+      fail('gateway-unavailable');
+    }
+  }
+
+  function managerCandidateFromTab(tab, expectedWindowId = null, allowPending = false) {
+    if (!isObject(tab) || !validTabId(tab.id) || !validTabId(tab.windowId) ||
+        (expectedWindowId !== null && tab.windowId !== expectedWindowId)) return null;
+    const ownUrl = managerPageUrl();
+    if (tab.pendingUrl !== undefined && tab.pendingUrl !== null && tab.pendingUrl !== ownUrl) return null;
+    const loaded = tab.url === ownUrl;
+    const pending = allowPending && tab.pendingUrl === ownUrl;
+    if (!loaded && !pending) return null;
+    return {tabId: tab.id, windowId: tab.windowId, ordinal: null, active: tab.active === true, pending: !loaded};
+  }
+
+  async function revalidateManagerTab(tabId, expectedWindowId = null, allowPending = false) {
+    if (!validTabId(tabId) || (expectedWindowId !== null && !validTabId(expectedWindowId)) || !native.tabs || typeof native.tabs.get !== 'function') return null;
+    let tab;
+    try { tab = await callApi(native.tabs, 'get', tabId); }
+    catch { return null; }
+    if (!tab || tab.id !== tabId) return null;
+    return managerCandidateFromTab(tab, expectedWindowId, allowPending);
+  }
+
+  async function getPendingManagerTab(tabId) {
+    if (!validTabId(tabId) || !native.tabs || typeof native.tabs.get !== 'function') return null;
+    try { return await callApi(native.tabs, 'get', tabId); }
+    catch { return null; }
+  }
+
+  async function discoverManagerCandidates() {
+    if (!native.tabs || typeof native.tabs.query !== 'function') fail('gateway-unavailable');
+    let tabs;
+    try { tabs = await callApi(native.tabs, 'query', {}); }
+    catch { fail('gateway-unavailable'); }
+    if (!Array.isArray(tabs)) fail('gateway-unavailable');
+    const candidates = [];
+    for (const tab of tabs) {
+      const candidate = managerCandidateFromTab(tab, null, true);
+      if (!candidate) continue;
+      const current = await revalidateManagerTab(candidate.tabId, candidate.windowId, true);
+      if (current) candidates.push({...current});
+    }
+    candidates.sort((left, right) => left.windowId - right.windowId || left.tabId - right.tabId);
+    return candidates;
+  }
+
+  async function mergeManagerCandidates(candidates) {
+    return enqueueManagerState(async () => {
+      const previous = await readManagerRecency();
+      const byTabId = new Map(previous.candidates.map(candidate => [candidate.tabId, candidate]));
+      const nextCandidates = candidates.map(candidate => ({
+        tabId: candidate.tabId,
+        windowId: candidate.windowId,
+        ordinal: byTabId.get(candidate.tabId)?.ordinal ?? null,
+      }));
+      nextCandidates.sort((left, right) => left.tabId - right.tabId);
+      const unchanged = previous.candidates.length === nextCandidates.length && previous.candidates.every((candidate, index) =>
+        candidate.tabId === nextCandidates[index].tabId && candidate.windowId === nextCandidates[index].windowId && candidate.ordinal === nextCandidates[index].ordinal);
+      if (unchanged) return previous;
+      const state = {schemaVersion: 1, nextOrdinal: previous.nextOrdinal, candidates: nextCandidates};
+      await saveManagerRecency(state);
+      return state;
+    });
+  }
+
+  async function ensureManagerCandidate(candidate) {
+    return enqueueManagerState(async () => {
+      const state = await readManagerRecency();
+      const existing = state.candidates.find(item => item.tabId === candidate.tabId);
+      if (existing && existing.windowId === candidate.windowId) return state;
+      const candidates = state.candidates.filter(item => item.tabId !== candidate.tabId);
+      candidates.push({tabId: candidate.tabId, windowId: candidate.windowId, ordinal: existing?.ordinal ?? null});
+      candidates.sort((left, right) => left.tabId - right.tabId);
+      const next = {...state, candidates};
+      await saveManagerRecency(next);
+      return next;
+    });
+  }
+
+  async function removeManagerCandidate(tabId) {
+    if (!validTabId(tabId)) return;
+    return enqueueManagerState(async () => {
+      const state = await readManagerRecency();
+      const candidates = state.candidates.filter(candidate => candidate.tabId !== tabId);
+      if (candidates.length === state.candidates.length) return state;
+      const next = {...state, candidates};
+      await saveManagerRecency(next);
+      return next;
+    });
+  }
+
+  async function recordManagerUse(candidate) {
+    return enqueueManagerState(async () => {
+      const state = await readManagerRecency();
+      if (state.nextOrdinal >= Number.MAX_SAFE_INTEGER) fail('gateway-unavailable');
+      const candidates = state.candidates.filter(item => item.tabId !== candidate.tabId);
+      candidates.push({tabId: candidate.tabId, windowId: candidate.windowId, ordinal: state.nextOrdinal});
+      candidates.sort((left, right) => left.tabId - right.tabId);
+      const next = {schemaVersion: 1, nextOrdinal: state.nextOrdinal + 1, candidates};
+      await saveManagerRecency(next);
+      return next;
+    });
+  }
+
+  function rememberPendingManagerUse(tabId, windowId, useWhenReady, focusWhenReady) {
+    const previous = pendingManagerUses.get(tabId);
+    pendingManagerUses.set(tabId, {
+      windowId,
+      useWhenReady: Boolean(useWhenReady || previous?.useWhenReady),
+      focusWhenReady: Boolean(focusWhenReady || previous?.focusWhenReady),
+    });
+  }
+
+  async function reconcileManagerCandidates() {
+    try {
+      const candidates = await discoverManagerCandidates();
+      await mergeManagerCandidates(candidates);
+    } catch { /* A missing tabs permission leaves manager reuse unavailable without affecting the gateway. */ }
+  }
+
+  async function focusedActiveCandidate(candidates) {
+    if (!native.windows || typeof native.windows.getLastFocused !== 'function') return null;
+    let focused;
+    try { focused = await callApi(native.windows, 'getLastFocused', {populate: true}); }
+    catch { return null; }
+    if (!focused || focused.focused !== true || !validTabId(focused.id)) return null;
+    const active = candidates.filter(candidate => candidate.windowId === focused.id && candidate.active).sort((left, right) => left.tabId - right.tabId);
+    return active[0] || null;
+  }
+
+  async function rankManagerCandidates(candidates) {
+    await managerEventQueue.catch(() => {});
+    const recency = await enqueueManagerState(() => readManagerRecency()).catch(() => defaultManagerRecency());
+    const ranked = candidates.map(candidate => ({...candidate, ordinal: recency.candidates.find(item => item.tabId === candidate.tabId && item.windowId === candidate.windowId)?.ordinal ?? null}));
+    const used = ranked.some(candidate => Number.isSafeInteger(candidate.ordinal) && candidate.ordinal > 0);
+    if (used) return ranked.sort((left, right) => {
+      const leftUsed = Number.isSafeInteger(left.ordinal) && left.ordinal > 0;
+      const rightUsed = Number.isSafeInteger(right.ordinal) && right.ordinal > 0;
+      if (leftUsed !== rightUsed) return leftUsed ? -1 : 1;
+      return (right.ordinal || 0) - (left.ordinal || 0) || left.windowId - right.windowId || left.tabId - right.tabId;
+    });
+    const focused = await focusedActiveCandidate(ranked);
+    if (focused) return [focused, ...ranked.filter(candidate => candidate.tabId !== focused.tabId).sort((left, right) => left.windowId - right.windowId || left.tabId - right.tabId)];
+    // When no usage or currently focused window can be reconstructed, choose the lower tabId.
+    return [...ranked].sort((left, right) => left.tabId - right.tabId || left.windowId - right.windowId);
+  }
+
+  async function focusManagerCandidate(candidate) {
+    if (!native.tabs || typeof native.tabs.update !== 'function' || !native.windows || typeof native.windows.update !== 'function' || typeof native.windows.get !== 'function') return false;
+    const beforeActivate = await revalidateManagerTab(candidate.tabId, candidate.windowId);
+    if (!beforeActivate) return null;
+    try { await callApi(native.tabs, 'update', beforeActivate.tabId, {active: true}); }
+    catch { return await revalidateManagerTab(beforeActivate.tabId, beforeActivate.windowId) ? false : null; }
+    const beforeWindow = await revalidateManagerTab(beforeActivate.tabId, beforeActivate.windowId);
+    if (!beforeWindow) return null;
+    let window;
+    try { window = await callApi(native.windows, 'get', beforeWindow.windowId); }
+    catch { return await revalidateManagerTab(beforeWindow.tabId, beforeWindow.windowId) ? false : null; }
+    if (!window || window.id !== beforeWindow.windowId) return null;
+    const immediatelyBeforeFocus = await revalidateManagerTab(beforeWindow.tabId, beforeWindow.windowId);
+    if (!immediatelyBeforeFocus) return null;
+    const update = {focused: true};
+    if (window.state === 'minimized') update.state = 'normal';
+    try { await callApi(native.windows, 'update', immediatelyBeforeFocus.windowId, update); }
+    catch { return await revalidateManagerTab(immediatelyBeforeFocus.tabId, immediatelyBeforeFocus.windowId) ? false : null; }
+    const afterFocus = await revalidateManagerTab(beforeWindow.tabId, beforeWindow.windowId);
+    if (!afterFocus) return null;
+    await recordManagerUse(afterFocus).catch(() => {});
+    return true;
+  }
+
+  async function tryManagerCandidates(candidates) {
+    const ordered = await rankManagerCandidates(candidates);
+    for (const candidate of ordered) {
+      const current = await revalidateManagerTab(candidate.tabId, candidate.windowId, true);
+      if (!current) {
+        await removeManagerCandidate(candidate.tabId).catch(() => {});
+        continue;
+      }
+      if (current.pending) {
+        pendingManagerUses.set(current.tabId, {windowId: current.windowId, useWhenReady: false, focusWhenReady: true});
+        await ensureManagerCandidate(current).catch(() => {});
+        return {opened: true, reused: true};
+      }
+      const result = await focusManagerCandidate(current);
+      if (result === true) return {opened: true, reused: true};
+      if (result === false) fail('gateway-unavailable');
+      await removeManagerCandidate(current.tabId).catch(() => {});
+    }
+    return null;
+  }
+
+  async function openManagerInternal() {
+    if (!native.tabs || typeof native.tabs.create !== 'function') fail('gateway-unavailable');
+    await managerEventQueue.catch(() => {});
+    const candidates = await discoverManagerCandidates();
+    await mergeManagerCandidates(candidates).catch(() => {});
+    const reused = await tryManagerCandidates(candidates);
+    if (reused) return reused;
+    // Search immediately before creating to catch tabs opened while a stale candidate was being checked.
+    const lastCandidates = await discoverManagerCandidates();
+    await mergeManagerCandidates(lastCandidates).catch(() => {});
+    const lastReuse = await tryManagerCandidates(lastCandidates);
+    if (lastReuse) return lastReuse;
+    let created;
+    try { created = await callApi(native.tabs, 'create', {url: managerPageUrl(), active: true}); }
+    catch { fail('gateway-unavailable'); }
+    if (!created || !validTabId(created.id)) fail('gateway-unavailable');
+    const opened = await revalidateManagerTab(created.id);
+    if (opened) {
+      const focused = await focusManagerCandidate(opened);
+      if (focused === false) fail('gateway-unavailable');
+      if (focused === null) fail('gateway-unavailable');
+      return {opened: true, reused: false};
+    }
+    const pending = await revalidateManagerTab(created.id, null, true);
+    if (pending && pending.pending && validTabId(pending.windowId)) {
+      pendingManagerUses.set(created.id, {windowId: pending.windowId, useWhenReady: false, focusWhenReady: true});
+      await ensureManagerCandidate(pending).catch(() => {});
+      return {opened: true, reused: false};
+    }
+    fail('gateway-unavailable');
+  }
+
+  function openManagerShared() {
+    if (!managerOpenPromise) {
+      managerOpenPromise = openManagerInternal().finally(() => { managerOpenPromise = null; });
+    }
+    return managerOpenPromise;
+  }
+
+  async function handleTabActivated(activeInfo) {
+    if (!isObject(activeInfo) || !validTabId(activeInfo.tabId) || !validTabId(activeInfo.windowId)) return;
+    const candidate = await revalidateManagerTab(activeInfo.tabId, activeInfo.windowId, true);
+    if (candidate) {
+      if (candidate.pending) {
+        rememberPendingManagerUse(candidate.tabId, candidate.windowId, true, false);
+        await ensureManagerCandidate(candidate).catch(() => {});
+      } else {
+        pendingManagerUses.delete(candidate.tabId);
+        await recordManagerUse(candidate).catch(() => {});
+      }
+      return;
+    }
+    const tab = await getPendingManagerTab(activeInfo.tabId);
+    if (tab && tab.id === activeInfo.tabId && tab.windowId === activeInfo.windowId && tab.pendingUrl === managerPageUrl()) {
+      rememberPendingManagerUse(activeInfo.tabId, activeInfo.windowId, true, false);
+    } else pendingManagerUses.delete(activeInfo.tabId);
+  }
+
+  async function handleWindowFocused(windowId) {
+    if (!validTabId(windowId)) return;
+    let tabs;
+    try { tabs = await callApi(native.tabs, 'query', {active: true, windowId}); }
+    catch { return; }
+    if (!Array.isArray(tabs)) return;
+    for (const tab of tabs) {
+      const candidate = managerCandidateFromTab(tab, windowId, true) && await revalidateManagerTab(tab.id, windowId, true);
+      if (candidate) {
+        if (candidate.pending) {
+          rememberPendingManagerUse(candidate.tabId, windowId, true, false);
+          await ensureManagerCandidate(candidate).catch(() => {});
+        } else {
+          pendingManagerUses.delete(candidate.tabId);
+          await recordManagerUse(candidate).catch(() => {});
+        }
+        continue;
+      }
+      const pending = validTabId(tab?.id) ? await getPendingManagerTab(tab.id) : null;
+      if (pending && pending.windowId === windowId && pending.pendingUrl === managerPageUrl()) rememberPendingManagerUse(pending.id, windowId, true, false);
+    }
+  }
+
+  async function handleTabUpdated(tabId, changeInfo, tab) {
+    if (!validTabId(tabId) || !isObject(changeInfo)) return;
+    const pendingUse = pendingManagerUses.get(tabId);
+    const candidate = await revalidateManagerTab(tabId, pendingUse?.windowId ?? null, true);
+    if (candidate) {
+      if (candidate.pending) {
+        await ensureManagerCandidate(candidate).catch(() => {});
+        return;
+      }
+      if (pendingUse?.focusWhenReady) {
+        pendingManagerUses.delete(tabId);
+        const focused = await focusManagerCandidate(candidate);
+        if (focused === null) await removeManagerCandidate(tabId).catch(() => {});
+      } else if (pendingUse?.useWhenReady) {
+        pendingManagerUses.delete(tabId);
+        await recordManagerUse(candidate).catch(() => {});
+      } else await ensureManagerCandidate(candidate).catch(() => {});
+      return;
+    }
+    const state = await enqueueManagerState(() => readManagerRecency()).catch(() => defaultManagerRecency());
+    const managerPotential = pendingUse || state.candidates.some(candidate => candidate.tabId === tabId) ||
+      tab?.url === managerPageUrl() || tab?.pendingUrl === managerPageUrl() || changeInfo.url === managerPageUrl();
+    const pendingExternal = typeof tab?.pendingUrl === 'string' && tab.pendingUrl !== managerPageUrl();
+    if (managerPotential && (pendingExternal || changeInfo.url || changeInfo.status === 'complete')) {
+      pendingManagerUses.delete(tabId);
+      await removeManagerCandidate(tabId).catch(() => {});
+    }
+  }
+
+  async function handleTabRemoved(tabId) {
+    pendingManagerUses.delete(tabId);
+    await removeManagerCandidate(tabId).catch(() => {});
+  }
+
+  async function handleTabCreated(tab) {
+    const candidate = managerCandidateFromTab(tab, null, true);
+    if (candidate) {
+      await ensureManagerCandidate(candidate).catch(() => {});
+      if (candidate.pending && tab.active === true) rememberPendingManagerUse(candidate.tabId, candidate.windowId, true, false);
+    }
+  }
+
+  async function handleTabAttached(tabId, attachInfo) {
+    if (!validTabId(tabId) || !isObject(attachInfo) || !validTabId(attachInfo.newWindowId)) return;
+    const candidate = await revalidateManagerTab(tabId, attachInfo.newWindowId, true);
+    if (candidate) await ensureManagerCandidate(candidate).catch(() => {});
+    else await removeManagerCandidate(tabId).catch(() => {});
   }
 
   class GatewayFault extends Error {
@@ -898,8 +1286,10 @@
       if (page !== 'options.html') fail('unauthorized-sender');
     } else if (op === 'notifications.clear-local') {
       if (!['options.html', 'popup.html', 'index.html'].includes(page)) fail('unauthorized-sender');
+    } else if (op === 'manager.open') {
+      if (!['options.html', 'popup.html', 'index.html'].includes(page)) fail('unauthorized-sender');
     } else if (page === 'options.html') fail('unauthorized-sender');
-    if (page === 'popup.html' && !['root.read', 'agenda.read', 'operations.submit', 'notifications.clear-local'].includes(op)) fail('unauthorized-sender');
+    if (page === 'popup.html' && !['root.read', 'agenda.read', 'operations.submit', 'notifications.clear-local', 'manager.open'].includes(op)) fail('unauthorized-sender');
     return page;
   }
 
@@ -1007,6 +1397,12 @@
     const op = message.operation;
     const params = message.parameters;
     try {
+      if (op === 'manager.open') {
+        if (message.target !== null) fail('invalid-request');
+        exactKeys(params, []);
+        const data = await openManagerShared();
+        return {status: null, data};
+      }
       if (op === 'notifications.clear-local') {
         if (message.target !== null) fail('invalid-request');
         exactKeys(params, []);
@@ -1122,6 +1518,9 @@
 
   async function processMessage(message, sender) {
     const page = validateRpc(message, sender);
+    if (message.operation === 'manager.open') {
+      return executeGateway(message, page, configurationRevision);
+    }
     if (message.operation === 'notifications.clear-local') {
       return executeGateway(message, page, configurationRevision);
     }
@@ -1143,7 +1542,7 @@
       const fault = error instanceof GatewayFault ? error : new GatewayFault('gateway-unavailable');
       if (!fault.operationId && operationId && fault.kind === 'uncertain') fault.operationId = operationId;
       if (fault.kind === 'permission-required' && fault.configurationRevision === configurationRevision) await disarmExisting().catch(() => {});
-      if (requestId && fault.configurationRevision === configurationRevision && !['invalid-request', 'unauthorized-sender', 'unsupported-operation'].includes(fault.kind)) {
+      if (requestId && message?.operation !== 'manager.open' && fault.configurationRevision === configurationRevision && !['invalid-request', 'unauthorized-sender', 'unsupported-operation'].includes(fault.kind)) {
         await recordGatewayError(fault, requestId, fault.configurationRevision).catch(() => {});
       }
       throw fault;
@@ -1166,52 +1565,94 @@
     return true;
   });
 
+  if (native.tabs) {
+    native.tabs.onActivated?.addListener(activeInfo => { void enqueueManagerEvent(() => handleTabActivated(activeInfo)).catch(() => {}); });
+    native.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => { void enqueueManagerEvent(() => handleTabUpdated(tabId, changeInfo, tab)).catch(() => {}); });
+    native.tabs.onCreated?.addListener(tab => { void enqueueManagerEvent(() => handleTabCreated(tab)).catch(() => {}); });
+    native.tabs.onRemoved?.addListener(tabId => { void enqueueManagerEvent(() => handleTabRemoved(tabId)).catch(() => {}); });
+    native.tabs.onAttached?.addListener((tabId, attachInfo) => { void enqueueManagerEvent(() => handleTabAttached(tabId, attachInfo)).catch(() => {}); });
+  }
+  native.windows?.onFocusChanged?.addListener(windowId => { void enqueueManagerEvent(() => handleWindowFocused(windowId)).catch(() => {}); });
+
   async function recordGatewayError(error, requestId, revision = configurationRevision) {
     if (revision !== configurationRevision) return;
-    const settings = await storedSettingsOrDefaults();
-    if (revision !== configurationRevision) return;
-    const safe = safeRemoteText(error.message, settings.token) || safeMessage(error.kind);
-    const errorState = {
-      kind: error.kind,
-      title: safeTitle(error.kind),
-      message: safe,
-      requestId,
-      updatedAt: new Date().toISOString(),
-    };
-    if (error.operationId) errorState.operationId = error.operationId;
-    if (revision !== configurationRevision) return;
-    await callApi(native.storage.local, 'set', {[ERROR_KEY]: errorState});
-    if (revision !== configurationRevision) return;
-    await setBadge('!', 'ElrikPiro: ' + safeTitle(error.kind) + '. ' + safe);
+    const badgeVersion = beginBadgeMutation();
+    try {
+      const settings = await storedSettingsOrDefaults();
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      const safe = safeRemoteText(error.message, settings.token) || safeMessage(error.kind);
+      const errorState = {
+        kind: error.kind,
+        title: safeTitle(error.kind),
+        message: safe,
+        requestId,
+        updatedAt: new Date().toISOString(),
+      };
+      if (error.operationId) errorState.operationId = error.operationId;
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      await callApi(native.storage.local, 'set', {[ERROR_KEY]: errorState});
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      await setBadge('!', 'ElrikPiro: ' + safeTitle(error.kind) + '. ' + safe, badgeVersion);
+    } finally { endBadgeMutation(badgeVersion); }
   }
 
   async function clearStoredError(revision = configurationRevision) {
     if (revision !== configurationRevision) return;
-    let values = {};
-    try { values = await callApi(native.storage.local, 'get', ERROR_KEY); } catch { return; }
-    if (revision !== configurationRevision) return;
-    if (values[ERROR_KEY] != null) await callApi(native.storage.local, 'set', {[ERROR_KEY]: null}).catch(() => {});
-    if (revision !== configurationRevision) return;
-    const action = native.action || native.browserAction;
-    if (action && typeof action.setBadgeText === 'function') await callApi(action, 'setBadgeText', {text: currentUrgent ? '●' : ''}).catch(() => {});
-    if (action && typeof action.setTitle === 'function') await callApi(action, 'setTitle', {title: currentUrgent ? 'ElrikPiro: hay tareas urgentes.' : 'ElrikPiro'}).catch(() => {});
+    const badgeVersion = beginBadgeMutation();
+    try {
+      let values = {};
+      try { values = await callApi(native.storage.local, 'get', ERROR_KEY); } catch { return; }
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      if (values[ERROR_KEY] != null) await callApi(native.storage.local, 'set', {[ERROR_KEY]: null}).catch(() => {});
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      await setBadge(currentUrgent ? '●' : '', null, badgeVersion).catch(() => {});
+    } finally { endBadgeMutation(badgeVersion); }
   }
 
-  async function setBadge(text, title = null) {
+  function beginBadgeMutation() {
+    badgeStateVersion += 1;
+    badgeMutationCount += 1;
+    return badgeStateVersion;
+  }
+
+  function endBadgeMutation(version) {
+    badgeMutationCount = Math.max(0, badgeMutationCount - 1);
+    if (version === badgeStateVersion) badgeStateVersion += 1;
+  }
+
+  function badgeSnapshotCurrent(version) {
+    return version === badgeStateVersion && badgeMutationCount === 0;
+  }
+
+  function setBadge(text, title = null, badgeVersion = badgeStateVersion) {
+    const result = badgeWriteQueue.then(() => {
+      if (badgeVersion !== badgeStateVersion) return;
+      return writeBadge(text, title, badgeVersion);
+    });
+    badgeWriteQueue = result.catch(() => {});
+    return result;
+  }
+
+  async function writeBadge(text, title, badgeVersion) {
     const action = native.action || native.browserAction;
     if (!action) return;
+    if (badgeVersion !== badgeStateVersion) return;
     if (typeof action.setBadgeText === 'function') await callApi(action, 'setBadgeText', {text}).catch(() => {});
+    if (badgeVersion !== badgeStateVersion) return;
     if (text === '●' || text === '!') {
       if (typeof action.setBadgeTextColor === 'function') {
         try {
           if (text === '●') {
             await callApi(action, 'setBadgeTextColor', {color: '#c62828'});
+            if (badgeVersion !== badgeStateVersion) return;
             await callApi(action, 'setBadgeBackgroundColor', {color: [0, 0, 0, 0]});
           } else {
             await callApi(action, 'setBadgeTextColor', {color: '#ffffff'});
+            if (badgeVersion !== badgeStateVersion) return;
             await callApi(action, 'setBadgeBackgroundColor', {color: '#c62828'});
           }
         } catch {
+          if (badgeVersion !== badgeStateVersion) return;
           await callApi(action, 'setBadgeBackgroundColor', {color: '#c62828'}).catch(() => {});
         }
       } else if (typeof action.setBadgeBackgroundColor === 'function') {
@@ -1220,6 +1661,7 @@
     } else if (text === '!' && typeof action.setBadgeBackgroundColor === 'function') {
       await callApi(action, 'setBadgeBackgroundColor', {color: '#c62828'});
     }
+    if (badgeVersion !== badgeStateVersion) return;
     if (typeof action.setTitle === 'function') await callApi(action, 'setTitle', {title: title || (text === '!' ? 'ElrikPiro: error de conexión.' : text === '●' ? 'ElrikPiro: hay tareas urgentes.' : 'ElrikPiro')});
   }
 
@@ -1229,29 +1671,41 @@
       fail('invalid-response');
     }
     if (revision !== configurationRevision) return;
-    const urgent = tasks.length > 0;
-    await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: urgent, endpoint: settings.serverUrl, updatedAt: new Date().toISOString()}}).catch(() => {});
-    if (revision !== configurationRevision) return;
-    currentUrgent = urgent;
-    await setBadge(currentUrgent ? '●' : '').catch(() => {});
+    const badgeVersion = beginBadgeMutation();
+    try {
+      const urgent = tasks.length > 0;
+      await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: urgent, endpoint: settings.serverUrl, updatedAt: new Date().toISOString()}}).catch(() => {});
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      currentUrgent = urgent;
+      await setBadge(currentUrgent ? '●' : '', null, badgeVersion).catch(() => {});
+    } finally { endBadgeMutation(badgeVersion); }
   }
 
   async function clearUrgency() {
+    const badgeVersion = beginBadgeMutation();
     alarmReconciliationCount += 1;
     try {
       currentUrgent = false;
       await callApi(native.alarms, 'clear', URGENCY_ALARM).catch(() => {});
+      if (badgeVersion !== badgeStateVersion) return;
       await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: false, updatedAt: new Date().toISOString()}}).catch(() => {});
-      await setBadge('');
-    } finally { alarmReconciliationCount -= 1; }
+      if (badgeVersion !== badgeStateVersion) return;
+      await setBadge('', null, badgeVersion);
+    } finally {
+      endBadgeMutation(badgeVersion);
+      alarmReconciliationCount -= 1;
+    }
   }
 
   async function restoreUrgency() {
     const revision = configurationRevision;
+    const badgeVersion = badgeStateVersion;
+    if (badgeMutationCount !== 0) return;
     try {
       const stored = await callApi(native.storage.local, 'get', [URGENCY_KEY, ERROR_KEY, SETTINGS_KEY]);
+      if (revision !== configurationRevision || !badgeSnapshotCurrent(badgeVersion)) return;
       const settings = await storedSettingsOrDefaults();
-      if (revision !== configurationRevision) return;
+      if (revision !== configurationRevision || !badgeSnapshotCurrent(badgeVersion)) return;
       currentUrgent = settings.monitorEnabled === true && stored[URGENCY_KEY]?.endpoint === settings.serverUrl && stored[URGENCY_KEY]?.active === true;
       const errorState = stored[ERROR_KEY];
       if (isObject(errorState)) {
@@ -1259,14 +1713,14 @@
         const rawSettings = stored[SETTINGS_KEY];
         const token = settings.token || (isObject(rawSettings) && typeof rawSettings.token === 'string' ? rawSettings.token : '');
         const message = safeRemoteText(errorState.message, token) || safeMessage(kind);
-        if (revision !== configurationRevision) return;
-        await setBadge('!', 'ElrikPiro: ' + safeTitle(kind) + '. ' + message);
+        if (revision !== configurationRevision || !badgeSnapshotCurrent(badgeVersion)) return;
+        await setBadge('!', 'ElrikPiro: ' + safeTitle(kind) + '. ' + message, badgeVersion);
       } else {
-        if (revision !== configurationRevision) return;
-        await setBadge(currentUrgent ? '●' : '');
+        if (revision !== configurationRevision || !badgeSnapshotCurrent(badgeVersion)) return;
+        await setBadge(currentUrgent ? '●' : '', null, badgeVersion);
       }
     } catch {
-      if (revision === configurationRevision) await setBadge('');
+      if (revision === configurationRevision && badgeSnapshotCurrent(badgeVersion)) await setBadge('', null, badgeVersion);
     }
   }
 
@@ -1409,6 +1863,7 @@
 
   async function startup() {
     try {
+      await reconcileManagerCandidates();
       await callApi(native.alarms, 'clear', LEGACY_MONITOR_ALARM).catch(() => {});
       await disarmLegacyConfiguration();
       await restoreUrgency();
