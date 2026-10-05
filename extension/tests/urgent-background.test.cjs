@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { bootBackground, response } = require("./helpers.cjs");
+const { HISTORY_A, notificationsSnapshot } = require("./notification-fixtures.cjs");
 
 const SETTINGS_KEY = "settings.v1";
 const ERROR_KEY = "gatewayError.v1";
@@ -57,20 +58,35 @@ function boot(fetch) {
   });
 }
 
-test("the urgency alarm makes a query-free authenticated HTTPS read without notification side effects", async () => {
+test("the urgency alarm validates an empty notification snapshot before its authenticated agenda read", async () => {
   const tasks = [{ id: "task/東京", description: "Prepare release", context: "work" }];
-  const env = boot(async () => json(agenda(tasks)));
+  const emptySnapshot = notificationsSnapshot([], { historyId: HISTORY_A });
+  const env = boot(async (url) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/notifications")) return json(emptySnapshot);
+    if (path.replace(/\/$/, "") === "/prefix/api/v1") {
+      return json({ version: "1", timeZone: "Europe/Madrid", _links: { self: { href: BASE }, agenda: { href: `${BASE}/agenda` } } });
+    }
+    if (path.endsWith("/agenda")) return json(agenda(tasks));
+    throw new Error(`Unexpected request ${url}`);
+  });
+  await waitFor(() => env.alarmCreates.some((alarm) => alarm.name === URGENCY_ALARM), "the five-minute monitor alarm");
   env.fireAlarm(URGENCY_ALARM);
-  await waitFor(() => env.requests.length === 1, "the agenda request");
+  await waitFor(() => env.requests.length === 3, "notification snapshot, root, and agenda requests");
   await waitFor(() => env.badgeState.text === "●", "the urgency badge");
 
-  const request = env.requests[0];
-  assert.equal(request.url, `${BASE}/agenda`);
-  assert.equal(request.init.method, "GET");
-  assert.equal(request.init.headers.Authorization, "Bearer test-bearer-token");
-  assert.equal(request.init.redirect, "error");
-  assert.equal(request.init.cache, "no-store");
-  assert.equal(request.init.credentials, "omit");
+  assert.deepEqual(env.requests.map(({ url }) => new URL(url).pathname), [
+    "/prefix/api/v1/notifications",
+    "/prefix/api/v1",
+    "/prefix/api/v1/agenda",
+  ]);
+  for (const request of env.requests) {
+    assert.equal(request.init.method, "GET");
+    assert.equal(request.init.headers.Authorization, "Bearer test-bearer-token");
+    assert.equal(request.init.redirect, "error");
+    assert.equal(request.init.cache, "no-store");
+    assert.equal(request.init.credentials, "omit");
+  }
   assert.equal(env.localData[URGENCY_KEY].active, true);
   assert.equal(env.notificationCalls.length, 0);
 });

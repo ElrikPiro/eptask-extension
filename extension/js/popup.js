@@ -1,7 +1,7 @@
 import { browserApi } from "./browser-api.js";
-import { gatewayCall, readGateway, assertSuccessfulReply, subscribeChanges } from "./messages.js";
+import { clearNotificationBuffer, gatewayCall, readGateway, assertSuccessfulReply, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
-import { node } from "./render.js";
+import { node, renderNotificationHistory } from "./render.js";
 
 const status = document.querySelector("#popup-status");
 const taskCard = document.querySelector("#urgent-task");
@@ -11,6 +11,10 @@ const refreshButton = document.querySelector("#refresh-agenda");
 const completeButton = document.querySelector("#complete-task");
 const snoozeButton = document.querySelector("#snooze-task");
 const errorBadge = document.querySelector("#popup-error-badge");
+const notificationList = document.querySelector("#popup-notification-list");
+const notificationStatus = document.querySelector("#popup-notification-monitor-status");
+const notificationContinuity = document.querySelector("#popup-notification-continuity");
+const clearNotificationsButton = document.querySelector("#popup-clear-history");
 
 const SAFE_ERRORS = Object.freeze({
   "permission-denied": "No se concedió permiso para acceder al servidor.",
@@ -43,6 +47,8 @@ let actionRevision = 0;
 let activeAction = null;
 let needsRefreshBeforeAction = false;
 let currentAgendaQuery = null;
+let historyClearPending = false;
+let localReadSequence = 0;
 
 function settingsAreReady() {
   return stateLoaded && isReady(extensionState?.settings);
@@ -55,6 +61,76 @@ function updateControls() {
   refreshButton.disabled = !canRefresh;
   completeButton.disabled = !canAct;
   snoozeButton.disabled = !canAct;
+  const hasLocalEntries = Boolean(extensionState?.notificationReception?.buffer?.length || extensionState?.history?.length);
+  clearNotificationsButton.disabled = historyClearPending || !hasLocalEntries;
+}
+
+function renderLocalNotifications() {
+  renderNotificationHistory({
+    list: notificationList,
+    status: notificationStatus,
+    continuity: notificationContinuity,
+    reception: extensionState?.notificationReception ?? null,
+    legacyHistory: extensionState?.history ?? [],
+    settings: extensionState?.settings ?? null,
+    gatewayError: extensionState?.gatewayError ?? null,
+    notificationError: extensionState?.notificationError ?? "",
+    monitorStatus: extensionState?.monitorStatus ?? null,
+  });
+  updateControls();
+}
+
+async function refreshLocalNotifications() {
+  const sequence = ++localReadSequence;
+  const requestSettingsRevision = settingsRevision;
+  try {
+    const saved = await readExtensionState();
+    if (sequence !== localReadSequence) return false;
+    extensionState = {...(extensionState ?? {}),
+      ...(!extensionState?.settings && requestSettingsRevision === settingsRevision ? {settings: saved.settings} : {}),
+      history: saved.history,
+      notificationReception: saved.notificationReception,
+      notificationError: saved.notificationError,
+      gatewayError: saved.gatewayError,
+      monitorStatus: saved.monitorStatus,
+    };
+    renderLocalNotifications();
+    return true;
+  } catch {
+    if (sequence !== localReadSequence) return false;
+    extensionState = {...(extensionState ?? {}), notificationError: "No se pudo leer la copia local de notificaciones."};
+    renderLocalNotifications();
+    return false;
+  }
+}
+
+async function clearLocalNotifications() {
+  if (historyClearPending || (!extensionState?.notificationReception?.buffer?.length && !extensionState?.history?.length)) return;
+  historyClearPending = true;
+  updateControls();
+  try {
+    const reply = assertSuccessfulReply(await clearNotificationBuffer());
+    if (reply.data?.cleared !== true || !Number.isSafeInteger(reply.data?.bufferGeneration)) {
+      throw new Error("La copia local no confirmó el vaciado.");
+    }
+    if (extensionState?.notificationReception) {
+      extensionState.notificationReception = {
+        ...extensionState.notificationReception,
+        buffer: [],
+        bufferGeneration: reply.data.bufferGeneration,
+        ...(extensionState.notificationReception.continuity ? {continuity: {...extensionState.notificationReception.continuity, localTruncated: false}} : {}),
+      };
+    }
+    extensionState = {...(extensionState ?? {}), history: [], notificationError: ""};
+    renderLocalNotifications();
+    await refreshLocalNotifications();
+  } catch (error) {
+    extensionState = {...(extensionState ?? {}), notificationError: error instanceof Error ? error.message : "No se pudo vaciar la copia local."};
+    renderLocalNotifications();
+  } finally {
+    historyClearPending = false;
+    updateControls();
+  }
 }
 
 function setStatus(message, kind = "") {
@@ -293,6 +369,7 @@ function applySettings(settings) {
   needsRefreshBeforeAction = false;
   extensionState = { ...(extensionState ?? {}), settings };
   stateLoaded = true;
+  renderLocalNotifications();
   updateControls();
 
   if (!isReady(settings)) {
@@ -317,6 +394,7 @@ refreshButton.addEventListener("click", () => {
 });
 completeButton.addEventListener("click", () => void performTaskAction("POPUP_DONE"));
 snoozeButton.addEventListener("click", () => void performTaskAction("POPUP_SNOOZE"));
+clearNotificationsButton.addEventListener("click", () => void clearLocalNotifications());
 
 subscribeChanges((changes) => {
   if (!changes.collections.some(collection => collection === "tasks" || collection === "agenda")) return;
@@ -325,23 +403,33 @@ subscribeChanges((changes) => {
 });
 
 window.addEventListener("focus", () => {
+  void refreshLocalNotifications();
   if (!agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
 });
 document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void refreshLocalNotifications();
   if (!document.hidden && !agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
 });
 
 subscribeStorageChanges((changes) => {
   if (changes["settings.v1"]) applySettings(changes["settings.v1"].newValue);
   if (changes["gatewayError.v1"]) paintErrorBadge(changes["gatewayError.v1"].newValue);
+  if (changes["notificationReception.v1"] || changes["notificationHistory.v1"] || changes["monitorStatus.v1"] || changes["gatewayError.v1"]) {
+    void refreshLocalNotifications();
+  }
 });
 
 const initialSettingsRevision = settingsRevision;
+const initialLocalReadSequence = localReadSequence;
 void readExtensionState().then((value) => {
   if (initialSettingsRevision !== settingsRevision) return;
-  extensionState = value;
+  const localStateChanged = initialLocalReadSequence !== localReadSequence;
+  extensionState = localStateChanged
+    ? {...(extensionState ?? {}), settings: value.settings}
+    : value;
   stateLoaded = true;
-  paintErrorBadge(value.gatewayError);
+  paintErrorBadge(localStateChanged ? extensionState.gatewayError : value.gatewayError);
+  renderLocalNotifications();
   if (!isReady(value.settings)) {
     agendaLoading = false;
     currentTask = null;
@@ -356,8 +444,16 @@ void readExtensionState().then((value) => {
   stateLoaded = true;
   agendaLoading = false;
   const detail = safeErrorMessage(error);
+  extensionState = {...(extensionState ?? {}), notificationError: initialLocalReadSequence === localReadSequence ? "No se pudo leer la copia local de notificaciones." : extensionState?.notificationError};
   paintErrorBadge(error);
+  renderLocalNotifications();
   updateControls();
-  setStatus(detail, "error-text");
-  renderCardMessage(detail, "error-text");
+  if (settingsAreReady()) {
+    setStatus("Configuración cargada. Actualiza la agenda para consultar la tarea prioritaria.", "online-text");
+    renderCardMessage("Actualiza la agenda para ver la tarea prioritaria.");
+    void refreshUrgentTask();
+  } else {
+    setStatus(detail, "error-text");
+    renderCardMessage(detail, "error-text");
+  }
 });

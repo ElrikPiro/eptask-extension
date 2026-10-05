@@ -30,6 +30,15 @@
         <button id="refresh-agenda" type="button" class="secondary" disabled>Actualizar</button>
         <button id="open-manager" type="button">Abrir gestor</button>
       </div>
+      <section class="popup-notifications" aria-labelledby="popup-notifications-title">
+        <div class="panel-header">
+          <h2 id="popup-notifications-title">Avisos guardados</h2>
+          <button id="popup-clear-history" class="secondary" type="button" disabled>Vaciar</button>
+        </div>
+        <p id="popup-notification-monitor-status" class="status-line offline-text" role="status" aria-live="polite">Cargando estado de recepción…</p>
+        <div id="popup-notification-continuity" class="notification-continuity" aria-live="polite" hidden></div>
+        <ul id="popup-notification-list" class="notification-list"><li class="empty">Sin notificaciones guardadas.</li></ul>
+      </section>
     </main>
     <script type="module" src="js/popup.js"></script>
   </body>

@@ -67,8 +67,6 @@ export const browserApi = Object.freeze({
   storage: Object.freeze({
     local: Object.freeze({
       get: (keys) => invoke(namespace.storage?.local, "get", [keys]),
-      set: (values) => invoke(namespace.storage?.local, "set", [values]),
-      remove: (keys) => invoke(namespace.storage?.local, "remove", [keys]),
     }),
     onChanged: namespace.storage?.onChanged,
   }),

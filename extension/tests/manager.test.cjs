@@ -146,6 +146,75 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test("the manager renders saved notices offline and clear-local preserves the received cursor", async () => {
+  const historyId = "14cc5d25-e2ec-4e17-b8a4-c084d27440ed";
+  const endpointKey = "https://tasks.example.test/team/api/v1";
+  const manager = bootManager({
+    initialSettings: {
+      schemaVersion: 1,
+      serverUrl: endpointKey,
+      token: "",
+      monitorEnabled: false,
+      timeoutMs: 30_000,
+    },
+    initialState: {
+      settings: {
+        schemaVersion: 1,
+        serverUrl: endpointKey,
+        token: "",
+        monitorEnabled: false,
+        timeoutMs: 30_000,
+      },
+      history: [],
+      notificationReception: {
+        schemaVersion: 1,
+        endpointKey,
+        historyId,
+        lastReceivedSequence: 5,
+        buffer: [{
+          endpointKey,
+          id: `${historyId}:5`,
+          historyId,
+          sequence: 5,
+          timestamp: "2026-10-05T09:00:00+02:00",
+          text: "<img src=x onerror=alert(1)> Aviso guardado",
+        }],
+        bufferGeneration: 3,
+        continuity: {
+          discardedThrough: 4,
+          missedRanges: [{ fromSequence: 3, throughSequence: 4 }],
+          gapsTruncated: false,
+          localTruncated: true,
+        },
+      },
+      notificationError: "",
+      monitorStatus: null,
+      gatewayError: null,
+    },
+  });
+  await manager.flush();
+
+  const list = manager.document.querySelector("#notification-list");
+  assert.equal(manager.reads.length, 0, "the offline history surface does not call the gateway");
+  assert.equal(manager.document.querySelector("#clear-history").disabled, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].dataset.notificationId, `${historyId}:5`);
+  assert.equal(list.children[0].dataset.historyId, historyId);
+  assert.equal(list.children[0].dataset.sequence, "5");
+  assert.match(list.textContent, /<img src=x onerror=alert\(1\)> Aviso guardado/);
+  assert.match(manager.document.querySelector("#notification-continuity").textContent, /número 3 al 4/);
+
+  manager.document.querySelector("#clear-history").click();
+  await manager.flush();
+  assert.deepEqual(manager.clearCalls, [{ operation: "notifications.clear-local" }]);
+  assert.equal(manager.reads.length, 0, "clearing local notices does not contact the server");
+  assert.equal(manager.writes.length, 0);
+  assert.equal(list.children.length, 1);
+  assert.match(list.children[0].className, /empty/);
+  assert.equal(manager.document.querySelector("#clear-history").disabled, true);
+  assert.match(manager.document.querySelector("#notification-monitor-status").textContent, /desactivada/);
+});
+
 test("each manager document sends a complete independent task view", async () => {
   const sharedCalls = [];
   const firstServer = serverFixture();

@@ -162,6 +162,97 @@ export function formatTimestamp(timestamp) {
   return Number.isNaN(date.getTime()) ? String(timestamp ?? "") : date.toLocaleString();
 }
 
+function notificationServerLabel(endpointKey) {
+  try {
+    const url = new URL(endpointKey);
+    if (url.protocol === "https:" && url.hostname) return `Servidor ${url.host}`;
+  } catch { /* The item remains identifiable in storage even if its label is unavailable. */ }
+  return "Servidor de origen no disponible";
+}
+
+function notificationStatusText({reception, legacyHistory, settings, gatewayError, notificationError, monitorStatus}) {
+  const pieces = [];
+  if (settings?.monitorEnabled === true) pieces.push("Recepción automática activada.");
+  else pieces.push("Recepción automática desactivada.");
+
+  if (reception?.lastReceivedSequence > 0) {
+    pieces.push(`Último aviso recibido: número ${reception.lastReceivedSequence}.`);
+  } else if (!reception && legacyHistory?.length) {
+    pieces.push("Hay avisos locales antiguos cuyo servidor de origen no está identificado.");
+  } else {
+    pieces.push("Aún no se han recibido avisos.");
+  }
+
+  if (notificationError) pieces.push(notificationError);
+  else if (gatewayError && typeof gatewayError.message === "string" && gatewayError.message) {
+    pieces.push(`Último error de conexión: ${gatewayError.message}`);
+  }
+
+  const status = monitorStatus?.status;
+  if (status === "running") pieces.push("El monitor está consultando el servidor.");
+  else if (status === "error") pieces.push("La última consulta del monitor terminó con un error.");
+  return pieces.join(" ");
+}
+
+export function renderNotificationHistory({list, status, continuity, reception, legacyHistory = [], settings = null, gatewayError = null, notificationError = "", monitorStatus = null}) {
+  if (!list) return;
+  list.replaceChildren();
+  if (status) {
+    status.textContent = notificationStatusText({reception, legacyHistory, settings, gatewayError, notificationError, monitorStatus});
+    status.classList.toggle("error-text", Boolean(notificationError || gatewayError));
+    status.classList.toggle("offline-text", settings?.monitorEnabled !== true && !notificationError && !gatewayError);
+  }
+
+  if (continuity) {
+    continuity.replaceChildren();
+    const notes = [];
+    const metadata = reception?.continuity;
+    if (metadata?.discardedThrough > 0) {
+      notes.push(`El servidor ya había retirado avisos hasta el número ${metadata.discardedThrough}, incluido, cuando se consultó el historial.`);
+    }
+    for (const range of metadata?.missedRanges || []) {
+      notes.push(`No se recibieron los avisos del número ${range.fromSequence} al ${range.throughSequence}.`);
+    }
+    if (metadata?.gapsTruncated) notes.push("Se conocen más interrupciones de las que se pueden mostrar aquí.");
+    if (metadata?.localTruncated) notes.push("La copia local alcanzó su límite y conserva solo los avisos más recientes.");
+    if (legacyHistory?.length) notes.push("Los avisos antiguos se conservan aparte porque no incluyen la identidad del servidor.");
+    if (notificationError && reception) notes.push("No se pudo validar parte de la información de continuidad; los avisos guardados siguen visibles.");
+    if (notes.length) {
+      for (const note of notes) continuity.append(node("p", note, "continuity-note"));
+      continuity.hidden = false;
+    } else {
+      continuity.hidden = true;
+    }
+  }
+
+  const entries = reception?.buffer || [];
+  for (const entry of entries) {
+    const item = node("li");
+    item.dataset.notificationId = entry.id;
+    item.dataset.historyId = entry.historyId;
+    item.dataset.sequence = String(entry.sequence);
+    item.append(node("p", entry.text));
+    item.append(node("small", `${notificationServerLabel(entry.endpointKey)} · aviso ${entry.sequence} · ${formatTimestamp(entry.timestamp)}`));
+    list.append(item);
+  }
+
+  for (const entry of legacyHistory || []) {
+    const item = node("li", null, "legacy-notification");
+    if (typeof entry.id === "string") item.dataset.notificationId = entry.id;
+    item.dataset.source = "legacy-local";
+    item.append(node("p", entry.message));
+    const received = typeof entry.receivedAt === "string" ? ` · recibido ${formatTimestamp(entry.receivedAt)}` : "";
+    item.append(node("small", `Aviso local antiguo · origen no identificado · ${formatTimestamp(entry.timestamp)}${received}`));
+    list.append(item);
+  }
+
+  if (notificationError && !reception) {
+    list.append(node("li", notificationError, "empty error-text"));
+  } else if (!entries.length && !legacyHistory?.length) {
+    list.append(node("li", "Sin notificaciones guardadas.", "empty"));
+  }
+}
+
 export function humanField(name) {
   const labels = {
     description: "Descripción",

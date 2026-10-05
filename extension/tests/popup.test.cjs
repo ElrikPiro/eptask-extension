@@ -6,6 +6,7 @@ const vm = require("node:vm");
 const { extensionRoot } = require("./helpers.cjs");
 
 const popupPath = path.join(extensionRoot, "js/popup.js");
+const renderPath = path.join(extensionRoot, "js/render.js");
 const popupSource = fs.readFileSync(popupPath, "utf8")
   .replace(/^import .*;\s*$/gm, "") + `
 globalThis.__popupTest = {
@@ -16,11 +17,15 @@ globalThis.__popupTest = {
     agendaLoading,
     activeAction,
     needsRefreshBeforeAction,
+    notificationReception: extensionState?.notificationReception,
+    notificationError: extensionState?.notificationError,
   }),
   refreshUrgentTask,
   performTaskAction,
 };
 `;
+const renderSource = fs.readFileSync(renderPath, "utf8")
+  .replace(/^export\s+/gm, "") + `\n globalThis.__popupRenderer = { node, renderNotificationHistory };`;
 
 const readySettings = (overrides = {}) => ({
   schemaVersion: 1,
@@ -63,6 +68,25 @@ class FakeElement {
     this.children = [];
     this.listeners = new Map();
     this.attributes = new Map();
+    this.dataset = new Proxy({}, {
+      get: (_target, property) => this.attributes.get(`data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`),
+      set: (_target, property, value) => {
+        this.attributes.set(`data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`, String(value));
+        return true;
+      },
+    });
+    this.classList = {
+      toggle: (name, force) => {
+        const classes = new Set(this.className.split(/\\s+/).filter(Boolean));
+        const shouldAdd = force === undefined ? !classes.has(name) : Boolean(force);
+        if (shouldAdd) classes.add(name);
+        else classes.delete(name);
+        this.className = [...classes].join(" ");
+        return shouldAdd;
+      },
+    };
+    this.hidden = false;
+    this.title = "";
     this.className = "";
     this.disabled = false;
     this._textContent = "";
@@ -110,10 +134,11 @@ class FakeElement {
   }
 }
 
-function bootPopup({ initialSettings = readySettings(), respond, serverTimeZone = "Europe/Madrid" } = {}) {
+function bootPopup({ initialSettings = readySettings(), initialState, initialStatePromise, respond, serverTimeZone = "Europe/Madrid" } = {}) {
   const selectors = [
     "#popup-status", "#urgent-task", "#open-options", "#open-manager",
     "#refresh-agenda", "#complete-task", "#snooze-task", "#popup-error-badge",
+    "#popup-notification-list", "#popup-notification-monitor-status", "#popup-notification-continuity", "#popup-clear-history",
   ];
   const elements = new Map(selectors.map((selector) => [selector, new FakeElement() ]));
   for (const selector of ["#refresh-agenda", "#complete-task", "#snooze-task"]) {
@@ -123,7 +148,9 @@ function bootPopup({ initialSettings = readySettings(), respond, serverTimeZone 
   const calls = [];
   let storageListener = null;
   let changeListener = null;
-  const statePromise = Promise.resolve({ settings: initialSettings, history: [], monitorStatus: null });
+  let localState = initialState || { settings: initialSettings, history: [], notificationReception: null, notificationError: "", monitorStatus: null, gatewayError: null };
+  let initialReadPending = Boolean(initialStatePromise);
+  const clearCalls = [];
   const document = {
     querySelector(selector) {
       const element = elements.get(selector);
@@ -190,22 +217,54 @@ function bootPopup({ initialSettings = readySettings(), respond, serverTimeZone 
         typeof settings.token === "string" && settings.token.trim(),
       );
     },
-    readExtensionState: () => statePromise,
+    readExtensionState() {
+      if (initialReadPending) {
+        initialReadPending = false;
+        return initialStatePromise;
+      }
+      return Promise.resolve(localState);
+    },
+    async clearNotificationBuffer() {
+      clearCalls.push({ operation: "notifications.clear-local" });
+      const reception = localState.notificationReception;
+      const bufferGeneration = (reception?.bufferGeneration || 0) + 1;
+      localState = {
+        ...localState,
+        history: [],
+        notificationReception: reception ? {
+          ...reception,
+          buffer: [],
+          bufferGeneration,
+          ...(reception.continuity ? { continuity: { ...reception.continuity, localTruncated: false } } : {}),
+        } : null,
+      };
+      return success({ cleared: true, bufferGeneration });
+    },
     subscribeStorageChanges(listener) {
       storageListener = listener;
       return () => {};
     },
   };
-  sandbox.node = node;
   const context = vm.createContext(sandbox);
+  vm.runInContext(renderSource, context, { filename: renderPath, timeout: 2_000 });
   vm.runInContext(popupSource, context, { filename: popupPath, timeout: 2_000 });
 
   return {
     calls,
+    clearCalls,
     elements,
     state: () => context.__popupTest.getState(),
     changeSettings(settings) {
       storageListener({ "settings.v1": { newValue: settings } });
+    },
+    storageChanged(changes) {
+      if (changes["notificationReception.v1"]) {
+        localState = { ...localState, notificationReception: changes["notificationReception.v1"].newValue };
+      }
+      if (changes["notificationHistory.v1"]) {
+        localState = { ...localState, history: changes["notificationHistory.v1"].newValue };
+      }
+      storageListener(changes);
     },
     invalidate(changes = { taskIds: [], projectNames: [], eventNames: [], collections: ["tasks", "agenda"] }) {
       changeListener?.(changes);
@@ -570,4 +629,102 @@ test("the popup shows a real HTTP status and clears its badge after a successful
   await waitFor(() => !env.state().agendaLoading && badge.hidden, "successful refresh to clear badge");
   assert.equal(badge.title, "");
   assert.equal(badge.attributes.has("aria-label"), false);
+});
+
+test("notification history is rendered and cleared locally while disconnected", async () => {
+  const historyId = "4d217360-5d69-47c9-bcc3-5a4d76cf1b32";
+  const endpointKey = "https://tasks.example.test/team/api/v1";
+  const entry = {
+    endpointKey,
+    id: `${historyId}:5`,
+    historyId,
+    sequence: 5,
+    timestamp: "2026-10-05T09:00:00+02:00",
+    text: "<img src=x onerror=alert(1)> aviso recibido",
+  };
+  const reception = {
+    schemaVersion: 1,
+    endpointKey,
+    historyId,
+    lastReceivedSequence: 5,
+    buffer: [entry],
+    bufferGeneration: 3,
+    continuity: {
+      discardedThrough: 4,
+      missedRanges: [{ fromSequence: 3, throughSequence: 4 }],
+      gapsTruncated: false,
+      localTruncated: true,
+    },
+  };
+  const env = bootPopup({
+    initialSettings: readySettings({ monitorEnabled: false }),
+    initialState: {
+      settings: readySettings({ monitorEnabled: false }),
+      history: [],
+      notificationReception: reception,
+      notificationError: "",
+      gatewayError: null,
+    },
+  });
+  await waitFor(() => env.state().stateLoaded, "local notification history");
+
+  const list = env.elements.get("#popup-notification-list");
+  assert.equal(env.calls.length, 0, "rendering the saved history never contacts the server");
+  assert.equal(env.elements.get("#popup-clear-history").disabled, false);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0].dataset.notificationId, `${historyId}:5`);
+  assert.equal(list.children[0].dataset.historyId, historyId);
+  assert.equal(list.children[0].dataset.sequence, "5");
+  assert.match(list.textContent, /<img src=x onerror=alert\(1\)> aviso recibido/);
+  assert.equal(list.children[0].children[0].children.length, 0, "notification text is assigned as text, not parsed markup");
+  assert.match(env.elements.get("#popup-notification-continuity").textContent, /número 4/);
+  assert.match(env.elements.get("#popup-notification-continuity").textContent, /número 3 al 4/);
+  assert.match(env.elements.get("#popup-notification-continuity").textContent, /límite/);
+
+  env.elements.get("#popup-clear-history").click();
+  await waitFor(() => env.clearCalls.length === 1 && list.children.length === 1 && list.children[0].className.includes("empty"), "local notification clear");
+  assert.deepEqual(env.clearCalls, [{ operation: "notifications.clear-local" }]);
+  assert.equal(env.calls.length, 0, "clearing the local copy never contacts the server");
+  assert.equal(env.state().notificationReception.buffer.length, 0);
+  assert.equal(env.state().notificationReception.historyId, historyId);
+  assert.equal(env.state().notificationReception.lastReceivedSequence, 5);
+  assert.equal(env.state().notificationReception.bufferGeneration, 4);
+  assert.equal(env.state().notificationReception.continuity.localTruncated, false);
+  assert.equal(env.elements.get("#popup-clear-history").disabled, true);
+});
+
+test("a local notification update during initial storage hydration is not overwritten by the older snapshot", async () => {
+  const initialRead = deferred();
+  const historyId = "a5d5c365-cf9d-4b45-8612-a97448358dc1";
+  const endpointKey = "https://tasks.example.test/api/v1";
+  const currentReception = {
+    schemaVersion: 1,
+    endpointKey,
+    historyId,
+    lastReceivedSequence: 1,
+    buffer: [{ endpointKey, id: `${historyId}:1`, historyId, sequence: 1, timestamp: "2026-10-05T10:00:00Z", text: "current local notice" }],
+    bufferGeneration: 0,
+    continuity: { discardedThrough: 0, missedRanges: [], gapsTruncated: false, localTruncated: false },
+  };
+  const env = bootPopup({
+    initialState: { settings: readySettings(), history: [], notificationReception: null, notificationError: "", gatewayError: null },
+    initialStatePromise: initialRead.promise,
+    respond: (operation) => operation === "GET_AGENDA"
+      ? Promise.resolve(success({ active_urgent_tasks: [] }))
+      : undefined,
+  });
+
+  env.storageChanged({ "notificationReception.v1": { newValue: currentReception } });
+  await env.flush();
+  assert.equal(env.state().notificationReception.historyId, historyId);
+  assert.equal(env.elements.get("#popup-notification-list").textContent.includes("current local notice"), true);
+
+  initialRead.resolve({ settings: readySettings(), history: [], notificationReception: null, notificationError: "", gatewayError: null });
+  await env.flush();
+
+  assert.equal(env.state().stateLoaded, true);
+  assert.equal(env.state().settings.monitorEnabled, true);
+  assert.equal(env.state().notificationReception.historyId, historyId);
+  assert.equal(env.elements.get("#popup-notification-list").textContent.includes("current local notice"), true);
+  assert.ok(env.calls.some((call) => call.operation === "root.read"), "the hydrated connection can still start its agenda read");
 });

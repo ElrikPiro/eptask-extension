@@ -1,7 +1,7 @@
 import { browserApi } from "./browser-api.js";
-import { assertSuccessfulReply, readGateway, submitOperation, subscribeChanges } from "./messages.js";
+import { assertSuccessfulReply, clearNotificationBuffer, readGateway, submitOperation, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
-import { emptyState, formatAmount, formatTimestamp, humanField, keyValuePanel, node, panel, taskInfoPanel, taskTable } from "./render.js";
+import { emptyState, formatAmount, formatTimestamp, humanField, keyValuePanel, node, panel, renderNotificationHistory, taskInfoPanel, taskTable } from "./render.js";
 
 const DEFAULT_FILTER = "All active task filter";
 const DEFAULT_ALGORITHM = "GTD Algorithm";
@@ -50,10 +50,15 @@ const state = {
   readSequences: Object.create(null),
   monitorStatus: null,
   monitorUpdateRevision: 0,
+  gatewayError: null,
   timeZone: null,
   agendaDayInitialized: false,
-  history: [],
-  historyUpdateRevision: 0,
+  notificationReception: null,
+  legacyHistory: [],
+  notificationError: "",
+  notificationUpdateRevision: 0,
+  localReadSequence: 0,
+  historyClearPending: false,
   busy: false,
   view: "tasks",
   views: {
@@ -79,7 +84,6 @@ const state = {
   selectedProjectName: null,
   drafts: Object.create(null),
   pendingFresh: Object.create(null),
-  historyError: "",
   pendingRemoteRefresh: false,
   pendingChanges: { taskIds: [], projectNames: [], eventNames: [], collections: [] },
   pendingConnectionReload: false,
@@ -113,7 +117,7 @@ function updateConnection() {
       button.disabled = !ready || state.busy;
     }
   }
-  document.querySelector("#clear-history").disabled = true;
+  updateHistoryControls();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.disabled = state.busy;
     button.classList.toggle("secondary", button.dataset.view !== state.view);
@@ -124,6 +128,70 @@ function updateConnection() {
 function setBusy(value) {
   state.busy = value;
   updateConnection();
+}
+
+function updateHistoryControls() {
+  const button = document.querySelector("#clear-history");
+  if (!button) return;
+  const hasLocalEntries = Boolean(state.notificationReception?.buffer?.length || state.legacyHistory.length);
+  button.disabled = state.historyClearPending || !hasLocalEntries;
+}
+
+function applyLocalNotificationState(saved) {
+  state.notificationReception = saved.notificationReception;
+  state.legacyHistory = saved.history;
+  state.notificationError = saved.notificationError || "";
+  state.gatewayError = saved.gatewayError;
+  state.monitorStatus = saved.monitorStatus;
+  renderHistory();
+  updateHistoryControls();
+}
+
+async function refreshLocalNotifications() {
+  const sequence = ++state.localReadSequence;
+  try {
+    const saved = await readExtensionState();
+    if (sequence !== state.localReadSequence) return false;
+    applyLocalNotificationState(saved);
+    return true;
+  } catch {
+    if (sequence !== state.localReadSequence) return false;
+    state.notificationError = "No se pudo leer la copia local de notificaciones.";
+    renderHistory();
+    updateHistoryControls();
+    return false;
+  }
+}
+
+async function clearLocalNotifications() {
+  if (state.historyClearPending || (!state.notificationReception?.buffer?.length && !state.legacyHistory.length)) return;
+  state.historyClearPending = true;
+  updateHistoryControls();
+  try {
+    const reply = assertSuccessfulReply(await clearNotificationBuffer());
+    if (reply.data?.cleared !== true || !Number.isSafeInteger(reply.data?.bufferGeneration)) {
+      throw new Error("La copia local no confirmó el vaciado.");
+    }
+    if (state.notificationReception) {
+      state.notificationReception = {
+        ...state.notificationReception,
+        buffer: [],
+        bufferGeneration: reply.data.bufferGeneration,
+        ...(state.notificationReception.continuity ? {continuity: {...state.notificationReception.continuity, localTruncated: false}} : {}),
+      };
+    }
+    state.legacyHistory = [];
+    state.notificationError = "";
+    renderHistory();
+    updateHistoryControls();
+    await refreshLocalNotifications();
+    showMessage("Se vaciaron los avisos guardados en este dispositivo.");
+  } catch (error) {
+    showMessage(error instanceof Error ? error.message : "No se pudo vaciar la copia local.", "error");
+  } finally {
+    state.historyClearPending = false;
+    updateHistoryControls();
+  }
 }
 
 function requireReady() {
@@ -1369,6 +1437,7 @@ async function handleActionButton(button) {
   const action = button.dataset.action;
   if (action === "refresh" || action === "reload") {
     await perform("Actualizando datos", async () => {
+      await refreshLocalNotifications();
       const complete = await refreshLoadedData();
       renderMainView();
       showMessage(complete ? "Datos actualizados. Los borradores de esta pantalla se conservaron." : "No se pudieron actualizar todos los datos. Se conservaron los datos y borradores disponibles.", complete ? "info" : "error");
@@ -1590,21 +1659,17 @@ function finite(value, digits = 2) {
 function renderHistory() {
   const list = document.querySelector("#notification-list");
   if (!list) return;
-  list.replaceChildren();
-  if (state.historyError) {
-    list.append(node("li", state.historyError, "empty"));
-    return;
-  }
-  if (!state.history.length) {
-    list.append(node("li", "Sin notificaciones guardadas.", "empty"));
-    return;
-  }
-  for (const entry of state.history) {
-    const item = node("li");
-    item.append(node("p", typeof entry?.message === "string" ? entry.message : ""));
-    item.append(node("small", `${entry?.timestamp || ""}${entry?.receivedAt ? ` · recibido ${new Date(entry.receivedAt).toLocaleString()}` : ""}`));
-    list.append(item);
-  }
+  renderNotificationHistory({
+    list,
+    status: document.querySelector("#notification-monitor-status"),
+    continuity: document.querySelector("#notification-continuity"),
+    reception: state.notificationReception,
+    legacyHistory: state.legacyHistory,
+    settings: state.settings,
+    gatewayError: state.gatewayError,
+    notificationError: state.notificationError,
+    monitorStatus: state.monitorStatus,
+  });
 }
 
 function bindStaticControls() {
@@ -1626,6 +1691,7 @@ function bindStaticControls() {
   });
   document.querySelector("#open-options").addEventListener("click", () => void browserApi.runtime.openOptionsPage());
   document.querySelector("[data-action='refresh']").addEventListener("click", (event) => void handleActionButton(event.currentTarget));
+  document.querySelector("#clear-history").addEventListener("click", () => void clearLocalNotifications());
 }
 
 mainView.addEventListener("input", (event) => {
@@ -1673,6 +1739,7 @@ subscribeStorageChanges((changes) => {
       state.pendingChanges = { taskIds: [], projectNames: [], eventNames: [], collections: [] };
     }
     updateConnection();
+    renderHistory();
     if (connectionChanged && isReady(state.settings)) {
       renderMainView();
       if (state.busy) state.pendingConnectionReload = true;
@@ -1682,15 +1749,18 @@ subscribeStorageChanges((changes) => {
       renderMainView();
     }
   }
-  if (changes["notificationHistory.v1"]) {
-    state.historyUpdateRevision += 1;
-    state.history = Array.isArray(changes["notificationHistory.v1"].newValue) ? changes["notificationHistory.v1"].newValue : [];
-    state.historyError = "";
-    renderHistory();
-  }
-  if (changes["monitorStatus.v1"]) {
-    state.monitorUpdateRevision += 1;
-    state.monitorStatus = changes["monitorStatus.v1"].newValue;
+  if (changes["notificationReception.v1"] || changes["notificationHistory.v1"] || changes["monitorStatus.v1"] || changes["gatewayError.v1"]) {
+    state.notificationUpdateRevision += 1;
+    if (changes["monitorStatus.v1"]) state.monitorUpdateRevision += 1;
+    if (changes["notificationReception.v1"]) {
+      void refreshLocalNotifications();
+    } else {
+      if (changes["notificationHistory.v1"]) state.legacyHistory = Array.isArray(changes["notificationHistory.v1"].newValue) ? changes["notificationHistory.v1"].newValue.filter(entry => entry && typeof entry === "object" && typeof entry.message === "string") : [];
+      if (changes["gatewayError.v1"]) state.gatewayError = changes["gatewayError.v1"].newValue;
+      if (changes["monitorStatus.v1"]) state.monitorStatus = changes["monitorStatus.v1"].newValue;
+      renderHistory();
+      updateHistoryControls();
+    }
   }
 });
 
@@ -1704,11 +1774,13 @@ subscribeChanges((change) => {
 });
 
 window.addEventListener("focus", () => {
+  void refreshLocalNotifications();
   if (document.visibilityState === "hidden" || !isReady(state.settings)) return;
   if (state.busy) queuePendingChanges();
   else void refreshLoadedData().catch(() => {});
 });
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void refreshLocalNotifications();
   if (document.visibilityState === "visible" && isReady(state.settings)) {
     if (state.busy) queuePendingChanges();
     else void refreshLoadedData().catch(() => {});
@@ -1719,7 +1791,8 @@ async function initialize() {
   bindStaticControls();
   const hydrationVersions = {
     settings: state.settingsUpdateRevision,
-    history: state.historyUpdateRevision,
+    notifications: state.notificationUpdateRevision,
+    localRead: state.localReadSequence,
     monitor: state.monitorUpdateRevision,
   };
   try {
@@ -1730,9 +1803,10 @@ async function initialize() {
       state.endpointKey = endpointKey(saved.settings);
       if (state.settingsRevision === 0) state.settingsRevision = 1;
     }
-    if (state.historyUpdateRevision === hydrationVersions.history) state.history = saved.history;
+    if (state.notificationUpdateRevision === hydrationVersions.notifications && state.localReadSequence === hydrationVersions.localRead) applyLocalNotificationState(saved);
     if (state.monitorUpdateRevision === hydrationVersions.monitor) state.monitorStatus = saved.monitorStatus;
     renderHistory();
+    updateHistoryControls();
     renderMainView();
     if (settingsChangedDuringHydration) return;
     if (isReady(state.settings)) {

@@ -22,7 +22,17 @@ La conexión comprueba que el servidor responde con el recurso HAL raíz esperad
 
 ## Popup e indicador
 
-El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de volver a consultar la agenda y comprobar el ID mostrado. Si cambia la conexión mientras esa consulta está en curso, no envía la operación al nuevo destino. El indicador de fondo consulta `/agenda` con una alarma de cinco minutos; no lee ni consume el historial de notificaciones. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
+El popup muestra la primera tarea urgente activa de la agenda. Permite completarla o posponerla cinco minutos después de volver a consultar la agenda y comprobar el ID mostrado. Si cambia la conexión mientras esa consulta está en curso, no envía la operación al nuevo destino. Los errores de conexión muestran un distintivo accesible y se conservan al reiniciar el background.
+
+## Avisos y copia local
+
+El background lee el historial de avisos mediante `GET` con una alarma cada cinco minutos. Valida la identidad del historial, los números de secuencia, las marcas de tiempo y los límites de retención antes de guardar la respuesta en el almacenamiento local de ese perfil. La identidad de cada aviso combina el ID del historial y su secuencia, por lo que dos avisos con el mismo texto siguen siendo distintos. El background guarda las entradas y el cursor antes de mostrar una notificación nativa; los avisos nuevos de un ciclo se agrupan en una sola alerta.
+
+El servidor conserva una ventana limitada y puede retirar entradas antiguas. Si el cliente detecta un salto de secuencia dentro del mismo historial, la copia local muestra el rango que no recibió. Un cambio de servidor o de identidad de historial conserva las entradas antiguas con su origen y no las atribuye al historial nuevo. El dispositivo conserva como máximo 1024 avisos; si se alcanza ese límite, mantiene los más recientes e indica que la copia local se truncó. Un fallo al leer o validar el historial no se interpreta como una agenda vacía ni permite continuar con la comprobación de tareas urgentes.
+
+La comprobación de tareas urgentes solo se ejecuta cuando una lectura válida confirma que no hay avisos nuevos. Usa la zona horaria y la agenda anunciadas por el servidor; una alerta nativa de tarea requiere el contexto exacto `alert`.
+
+El gestor y el popup muestran la copia guardada sin consultar la red. **Vaciar** borra solo la copia local de ese perfil y los registros locales antiguos; conserva el cursor y la identidad del servidor para evitar repetir alertas ya recibidas. No modifica ni reconoce los avisos del servidor ni elimina las notificaciones que ya creó el sistema operativo. Cada perfil del navegador mantiene su propia copia.
 
 ## Gestor
 
@@ -42,4 +52,4 @@ Con Node.js 20 o posterior, ejecuta desde `extension/`:
 node --test tests/*.test.cjs
 ```
 
-La suite verifica el contrato de mensajes, el control de permisos, la validación de destinos HTTPS, la agenda del popup y el gestor en documentos aislados con un DOM de prueba. Incluye formularios, operaciones, consultas explícitas, borradores y lecturas que terminan fuera de orden. También realiza una prueba de loopback con un certificado temporal para comprobar TLS, una identidad de servidor incorrecta y el rechazo de redirecciones a HTTP. No configura certificados del sistema ni sustituye las pruebas con ventanas y perfiles reales de Firefox y Chromium; los permisos y la confianza TLS nativos siguen pendientes de esa comprobación.
+La suite verifica el contrato de mensajes, el control de permisos, la validación de destinos HTTPS, el monitor de avisos, las vistas locales del gestor y popup y la agenda del popup en documentos aislados con un DOM de prueba. Comprueba reinicio del background, perfiles simulados, orden de persistencia antes de las alertas nativas, identidades repetidas, límites, huecos, cambios de historial, borrado local durante una lectura y fallos que impiden continuar hacia la agenda. Incluye formularios, operaciones, consultas explícitas, borradores y lecturas que terminan fuera de orden. También realiza una prueba de loopback con un certificado temporal para comprobar TLS, una identidad de servidor incorrecta y el rechazo de redirecciones a HTTP. No configura certificados del sistema ni sustituye las pruebas con ventanas y perfiles reales de Firefox y Chromium; los permisos, la confianza TLS y la separación de perfiles nativos siguen pendientes de esa comprobación.

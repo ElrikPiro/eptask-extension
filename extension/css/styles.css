@@ -132,6 +132,10 @@ form label { margin-top: 0.15rem; color: var(--muted); font-size: 0.85rem; }
 .notification-list li { padding: 0.65rem; border: 1px solid var(--border); border-radius: 0.65rem; background: rgba(255, 255, 255, 0.55); }
 .notification-list p { margin: 0 0 0.25rem; overflow-wrap: anywhere; }
 .notification-list small { color: var(--muted); }
+.notification-list li.legacy-notification { border-style: dashed; }
+.notification-continuity { display: grid; gap: 0.35rem; margin-top: 0.55rem; padding: 0.65rem 0.75rem; border-left: 3px solid var(--accent); border-radius: 0.45rem; background: rgba(187, 145, 65, 0.1); }
+.notification-continuity[hidden] { display: none; }
+.continuity-note { margin: 0; color: var(--muted); font-size: 0.84rem; }
 .panel-header { display: flex; justify-content: space-between; align-items: center; gap: 0.8rem; }
 pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(29, 43, 37, 0.07); white-space: pre-wrap; overflow-wrap: anywhere; }
 .agenda-group { margin-bottom: 0.8rem; }
@@ -194,6 +198,16 @@ pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(
 .popup-task-actions button { width: 100%; min-height: 2.65rem; }
 .popup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
 .popup-actions button { width: 100%; }
+.popup-notifications { display: grid; gap: 0.4rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+.popup-notifications .panel-header { align-items: center; }
+.popup-notifications h2 { margin: 0; font-size: 0.96rem; }
+.popup-notifications .panel-header button { padding: 0.38rem 0.6rem; font-size: 0.8rem; }
+.popup-notifications .notification-list { max-height: 13rem; overflow-y: auto; margin-top: 0.1rem; }
+.popup-notifications .notification-list li { padding: 0.5rem; }
+.popup-notifications .notification-list p { font-size: 0.85rem; }
+.popup-notifications .notification-list small, .popup-notifications .status-line { font-size: 0.76rem; }
+.popup-notifications .notification-continuity { padding: 0.45rem; }
+.popup-notifications .continuity-note { font-size: 0.76rem; }
 
 @media (max-width: 960px) {
   .layout-grid { grid-template-columns: 1fr; }

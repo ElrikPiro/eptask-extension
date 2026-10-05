@@ -8,10 +8,15 @@
   const SETTINGS_KEY = 'settings.v1';
   const ERROR_KEY = 'gatewayError.v1';
   const URGENCY_KEY = 'urgentIndicator.v1';
+  const RECEPTION_KEY = 'notificationReception.v1';
+  const LEGACY_HISTORY_KEY = 'notificationHistory.v1';
   const LEGACY_MONITOR_ALARM = 'eptask-notification-monitor';
   const URGENCY_ALARM = 'eptask-urgent-indicator';
   const PROTOCOL_VERSION = 1;
   const DEFAULT_TIMEOUT = 30000;
+  const RECEPTION_LIMIT = 1024;
+  const GAP_RANGE_LIMIT = 16;
+  const MONITOR_HEURISTIC = 'Remaining Effort(1)';
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const PATCH_FIELDS = new Set(['description', 'context', 'start', 'due', 'severity', 'totalCost', 'calm', 'raised', 'waited']);
   const OPERATION_TYPES = new Set([
@@ -22,12 +27,16 @@
     'root.read', 'tasks.list', 'tasks.get', 'tasks.patch', 'agenda.read', 'statistics.read',
     'events.list', 'strategies.list', 'projects.list', 'projects.get', 'notifications.read',
     'operations.submit', 'operations.get', 'settings.save', 'settings.connect',
-    'settings.disconnect', 'settings.clear', 'history.clear',
+    'settings.disconnect', 'settings.clear', 'history.clear', 'notifications.clear-local',
   ]);
-  let urgencyBusy = false;
+  let monitorBusy = false;
+  let alarmReconciliationCount = 0;
+  let startupBusy = false;
   let queue = Promise.resolve();
+  let receptionQueue = Promise.resolve();
   let currentUrgent = false;
   let configurationRevision = 0;
+  let nativeNotificationCounter = 0;
 
   function callApi(owner, method, ...args) {
     if (promiseApi) {
@@ -52,6 +61,230 @@
     const result = queue.then(job);
     queue = result.catch(() => {});
     return result;
+  }
+
+  function enqueueReception(job) {
+    const result = receptionQueue.then(job);
+    receptionQueue = result.catch(() => {});
+    return result;
+  }
+
+  function defaultReceptionState() {
+    return {
+      schemaVersion: 1,
+      endpointKey: '',
+      historyId: null,
+      lastReceivedSequence: 0,
+      buffer: [],
+      bufferGeneration: 0,
+      continuity: emptyContinuity(),
+    };
+  }
+
+  function emptyContinuity() {
+    return {discardedThrough: 0, missedRanges: [], gapsTruncated: false, localTruncated: false};
+  }
+
+  function validOffsetTimestamp(value) {
+    if (typeof value !== 'string') return false;
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+    if (!match || !Number.isFinite(Date.parse(value))) return false;
+    const [, year, month, day, hour, minute, second, , offsetHour, offsetMinute] = match;
+    const calendar = new Date(0);
+    calendar.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+    calendar.setUTCHours(0, 0, 0, 0);
+    if (calendar.getUTCFullYear() !== Number(year) || calendar.getUTCMonth() !== Number(month) - 1 || calendar.getUTCDate() !== Number(day) ||
+        Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59) return false;
+    if (offsetHour !== undefined && (Number(offsetHour) > 23 || Number(offsetMinute) > 59)) return false;
+    return true;
+  }
+
+  function validateEndpointKey(value) {
+    if (typeof value !== 'string' || value.length > 8192) fail('invalid-response');
+    if (value === '') return value;
+    let url;
+    try { url = new URL(value); } catch { fail('invalid-response'); }
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash || url.href.replace(/\/$/, '') !== value.replace(/\/$/, '')) fail('invalid-response');
+    return value;
+  }
+
+  function normalizeContinuity(value) {
+    if (value === null || value === undefined) return emptyContinuity();
+    exactKeys(value, ['discardedThrough', 'missedRanges', 'gapsTruncated', 'localTruncated'], ['discardedThrough', 'missedRanges', 'gapsTruncated', 'localTruncated']);
+    if (!Number.isSafeInteger(value.discardedThrough) || value.discardedThrough < 0 ||
+        !Array.isArray(value.missedRanges) || value.missedRanges.length > GAP_RANGE_LIMIT ||
+        typeof value.gapsTruncated !== 'boolean' || typeof value.localTruncated !== 'boolean') fail('invalid-response');
+    const missedRanges = value.missedRanges.map(range => {
+      exactKeys(range, ['fromSequence', 'throughSequence'], ['fromSequence', 'throughSequence']);
+      if (!Number.isSafeInteger(range.fromSequence) || range.fromSequence < 1 ||
+          !Number.isSafeInteger(range.throughSequence) || range.throughSequence < range.fromSequence) fail('invalid-response');
+      return {fromSequence: range.fromSequence, throughSequence: range.throughSequence};
+    });
+    return {discardedThrough: value.discardedThrough, missedRanges, gapsTruncated: value.gapsTruncated, localTruncated: value.localTruncated};
+  }
+
+  function normalizeReceptionState(value) {
+    if (value === undefined || value === null) return defaultReceptionState();
+    exactKeys(value, ['schemaVersion', 'endpointKey', 'historyId', 'lastReceivedSequence', 'buffer', 'bufferGeneration', 'continuity'],
+      ['schemaVersion', 'endpointKey', 'historyId', 'lastReceivedSequence', 'buffer', 'bufferGeneration']);
+    if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.lastReceivedSequence) || value.lastReceivedSequence < 0 ||
+        !Number.isSafeInteger(value.bufferGeneration) || value.bufferGeneration < 0 || !Array.isArray(value.buffer) || value.buffer.length > RECEPTION_LIMIT ||
+        (value.historyId !== null && !isUuid(value.historyId))) fail('invalid-response');
+    const endpointKey = validateEndpointKey(value.endpointKey);
+    const identities = new Set();
+    const buffer = value.buffer.map(entry => {
+      exactKeys(entry, ['endpointKey', 'id', 'historyId', 'sequence', 'timestamp', 'text'], ['endpointKey', 'id', 'historyId', 'sequence', 'timestamp', 'text']);
+      const itemEndpoint = validateEndpointKey(entry.endpointKey);
+      if (!itemEndpoint || !isUuid(entry.historyId) || !Number.isSafeInteger(entry.sequence) || entry.sequence < 1 ||
+          entry.id !== `${entry.historyId}:${entry.sequence}` || !validOffsetTimestamp(entry.timestamp) ||
+          typeof entry.text !== 'string' || entry.text.length > 1000) fail('invalid-response');
+      const identity = `${itemEndpoint}\u0000${entry.historyId}\u0000${entry.id}`;
+      if (identities.has(identity)) fail('invalid-response');
+      identities.add(identity);
+      return {endpointKey: itemEndpoint, id: entry.id, historyId: entry.historyId, sequence: entry.sequence, timestamp: entry.timestamp, text: entry.text};
+    });
+    return {
+      schemaVersion: 1,
+      endpointKey,
+      historyId: value.historyId,
+      lastReceivedSequence: value.lastReceivedSequence,
+      buffer,
+      bufferGeneration: value.bufferGeneration,
+      continuity: normalizeContinuity(value.continuity),
+    };
+  }
+
+  async function readReceptionState() {
+    let values;
+    try { values = await callApi(native.storage.local, 'get', RECEPTION_KEY); }
+    catch { fail('gateway-unavailable'); }
+    return normalizeReceptionState(values[RECEPTION_KEY]);
+  }
+
+  async function receptionGenerationMatches(expectedGeneration) {
+    try { return (await readReceptionState()).bufferGeneration === expectedGeneration; }
+    catch { return false; }
+  }
+
+  function validateNotificationSnapshot(data, settings) {
+    exactKeys(data, ['schemaVersion', 'historyId', 'nextSequence', 'discardedThrough', 'retainedFromSequence', 'retainedThroughSequence', 'total', 'observedAt', '_links', '_embedded'],
+      ['schemaVersion', 'historyId', 'nextSequence', 'discardedThrough', 'retainedFromSequence', 'retainedThroughSequence', 'total', 'observedAt', '_links', '_embedded']);
+    if (data.schemaVersion !== 1 || !isUuid(data.historyId) || data.historyId !== data.historyId.toLowerCase() ||
+        !Number.isSafeInteger(data.nextSequence) || data.nextSequence < 1 ||
+        !Number.isSafeInteger(data.discardedThrough) || data.discardedThrough < 0 || data.discardedThrough >= data.nextSequence ||
+        !Number.isSafeInteger(data.total) || data.total < 0 || data.total > RECEPTION_LIMIT || !validOffsetTimestamp(data.observedAt)) fail('invalid-response');
+    exactKeys(data._links, ['self', 'root'], ['self', 'root']);
+    for (const name of ['self', 'root']) {
+      exactKeys(data._links[name], ['href', 'method'], ['href']);
+      if (data._links[name].method !== undefined && data._links[name].method !== 'GET') fail('invalid-response');
+      const link = validateDestination(settings, data._links[name].href, false);
+      const expected = name === 'self' ? apiUrl(settings, 'notifications') : baseUrl(settings);
+      if (link.href.replace(/\/$/, '') !== expected.replace(/\/$/, '')) fail('invalid-response');
+    }
+    exactKeys(data._embedded, ['notifications'], ['notifications']);
+    if (!Array.isArray(data._embedded.notifications) || data._embedded.notifications.length !== data.total ||
+        data.total !== data.nextSequence - 1 - data.discardedThrough) fail('invalid-response');
+    const entries = data._embedded.notifications.map(entry => {
+      exactKeys(entry, ['id', 'historyId', 'sequence', 'timestamp', 'text'], ['id', 'historyId', 'sequence', 'timestamp', 'text']);
+      if (entry.historyId !== data.historyId || !Number.isSafeInteger(entry.sequence) ||
+          entry.sequence <= data.discardedThrough || entry.sequence >= data.nextSequence ||
+          entry.id !== `${data.historyId}:${entry.sequence}` || !validOffsetTimestamp(entry.timestamp) ||
+          typeof entry.text !== 'string' || entry.text.length > 20000) fail('invalid-response');
+      return {
+        id: entry.id,
+        historyId: entry.historyId,
+        sequence: entry.sequence,
+        timestamp: entry.timestamp,
+        text: safeRemoteText(entry.text, settings.token),
+      };
+    });
+    entries.sort((left, right) => left.sequence - right.sequence);
+    if (entries.some((entry, index) => entry.sequence !== data.discardedThrough + index + 1)) fail('invalid-response');
+    const first = entries.length ? entries[0].sequence : null;
+    const last = entries.length ? entries[entries.length - 1].sequence : null;
+    if (data.retainedFromSequence !== first || data.retainedThroughSequence !== last) fail('invalid-response');
+    return {historyId: data.historyId, nextSequence: data.nextSequence, discardedThrough: data.discardedThrough, entries};
+  }
+
+  function addMissedRange(continuity, fromSequence, throughSequence) {
+    if (fromSequence > throughSequence) return;
+    const ranges = continuity.missedRanges;
+    const last = ranges[ranges.length - 1];
+    if (last && fromSequence === last.throughSequence + 1) last.throughSequence = throughSequence;
+    else ranges.push({fromSequence, throughSequence});
+    if (ranges.length > GAP_RANGE_LIMIT) {
+      ranges.splice(0, ranges.length - GAP_RANGE_LIMIT);
+      continuity.gapsTruncated = true;
+    }
+  }
+
+  async function applyNotificationSnapshot(endpointKey, snapshot, expectedGeneration, revision) {
+    return enqueueReception(async () => {
+      if (revision !== configurationRevision) return {cancelled: true};
+      const current = await readReceptionState();
+      if (current.bufferGeneration !== expectedGeneration) return {cancelled: true};
+      const sameScope = current.endpointKey === endpointKey && current.historyId === snapshot.historyId;
+      let cursor = sameScope ? current.lastReceivedSequence : snapshot.discardedThrough;
+      let continuity = sameScope && current.continuity
+        ? current.continuity
+        : {discardedThrough: snapshot.discardedThrough, missedRanges: [], gapsTruncated: false, localTruncated: false};
+      if (sameScope) {
+        if (snapshot.nextSequence - 1 < current.lastReceivedSequence || snapshot.discardedThrough < continuity.discardedThrough) fail('invalid-response');
+        if (snapshot.discardedThrough > current.lastReceivedSequence) {
+          addMissedRange(continuity, current.lastReceivedSequence + 1, snapshot.discardedThrough);
+        }
+        continuity.discardedThrough = snapshot.discardedThrough;
+      }
+      const known = new Set(current.buffer.map(item => `${item.endpointKey}\u0000${item.historyId}\u0000${item.id}`));
+      const newEntries = [];
+      const buffer = [...current.buffer];
+      for (const entry of snapshot.entries) {
+        if (entry.sequence <= cursor) continue;
+        const item = {endpointKey, ...entry};
+        const identity = `${item.endpointKey}\u0000${item.historyId}\u0000${item.id}`;
+        if (known.has(identity)) continue;
+        known.add(identity);
+        buffer.push(item);
+        newEntries.push(item);
+      }
+      let localTruncated = continuity.localTruncated;
+      if (buffer.length > RECEPTION_LIMIT) {
+        buffer.splice(0, buffer.length - RECEPTION_LIMIT);
+        localTruncated = true;
+      }
+      continuity.localTruncated = localTruncated;
+      const state = {
+        schemaVersion: 1,
+        endpointKey,
+        historyId: snapshot.historyId,
+        lastReceivedSequence: snapshot.nextSequence - 1,
+        buffer,
+        bufferGeneration: current.bufferGeneration,
+        continuity,
+      };
+      if (revision !== configurationRevision) return {cancelled: true};
+      try { await callApi(native.storage.local, 'set', {[RECEPTION_KEY]: state}); }
+      catch { fail('gateway-unavailable'); }
+      return {cancelled: false, state, newEntries};
+    });
+  }
+
+  async function clearLocalReception() {
+    return enqueueReception(async () => {
+      const current = await readReceptionState();
+      if (current.bufferGeneration >= Number.MAX_SAFE_INTEGER) fail('gateway-unavailable');
+      const state = {
+        ...current,
+        buffer: [],
+        bufferGeneration: current.bufferGeneration + 1,
+        continuity: {...current.continuity, localTruncated: false},
+      };
+      try {
+        await callApi(native.storage.local, 'set', {[RECEPTION_KEY]: state});
+        await callApi(native.storage.local, 'remove', LEGACY_HISTORY_KEY);
+      } catch { fail('gateway-unavailable'); }
+      return state;
+    });
   }
 
   class GatewayFault extends Error {
@@ -663,8 +896,10 @@
     const op = message.operation;
     if (op.startsWith('settings.') || op === 'history.clear') {
       if (page !== 'options.html') fail('unauthorized-sender');
+    } else if (op === 'notifications.clear-local') {
+      if (!['options.html', 'popup.html', 'index.html'].includes(page)) fail('unauthorized-sender');
     } else if (page === 'options.html') fail('unauthorized-sender');
-    if (page === 'popup.html' && !['root.read', 'agenda.read', 'operations.submit'].includes(op)) fail('unauthorized-sender');
+    if (page === 'popup.html' && !['root.read', 'agenda.read', 'operations.submit', 'notifications.clear-local'].includes(op)) fail('unauthorized-sender');
     return page;
   }
 
@@ -772,6 +1007,12 @@
     const op = message.operation;
     const params = message.parameters;
     try {
+      if (op === 'notifications.clear-local') {
+        if (message.target !== null) fail('invalid-request');
+        exactKeys(params, []);
+        const state = await clearLocalReception();
+        return {status: null, data: {cleared: true, bufferGeneration: state.bufferGeneration}};
+      }
       if (op === 'settings.save' || op === 'settings.connect' || op === 'settings.disconnect' || op === 'settings.clear' || op === 'history.clear') {
         const result = await executeSettings(message, revision);
         return {status: result.status, data: result.data};
@@ -881,6 +1122,9 @@
 
   async function processMessage(message, sender) {
     const page = validateRpc(message, sender);
+    if (message.operation === 'notifications.clear-local') {
+      return executeGateway(message, page, configurationRevision);
+    }
     if (message.operation.startsWith('settings.') || message.operation === 'history.clear') {
       const revision = ++configurationRevision;
       return enqueue(() => executeGateway(message, page, revision));
@@ -993,10 +1237,13 @@
   }
 
   async function clearUrgency() {
-    currentUrgent = false;
-    await callApi(native.alarms, 'clear', URGENCY_ALARM).catch(() => {});
-    await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: false, updatedAt: new Date().toISOString()}}).catch(() => {});
-    await setBadge('');
+    alarmReconciliationCount += 1;
+    try {
+      currentUrgent = false;
+      await callApi(native.alarms, 'clear', URGENCY_ALARM).catch(() => {});
+      await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: false, updatedAt: new Date().toISOString()}}).catch(() => {});
+      await setBadge('');
+    } finally { alarmReconciliationCount -= 1; }
   }
 
   async function restoreUrgency() {
@@ -1024,12 +1271,15 @@
   }
 
   async function reconcileUrgencyAlarm(enabled) {
-    if (!enabled) {
-      await callApi(native.alarms, 'clear', URGENCY_ALARM).catch(() => {});
-      return;
-    }
-    const existing = await callApi(native.alarms, 'get', URGENCY_ALARM).catch(() => null);
-    if (!existing || existing.periodInMinutes !== 5) await callApi(native.alarms, 'create', URGENCY_ALARM, {delayInMinutes: 5, periodInMinutes: 5}).catch(() => {});
+    alarmReconciliationCount += 1;
+    try {
+      if (!enabled) {
+        await callApi(native.alarms, 'clear', URGENCY_ALARM).catch(() => {});
+        return;
+      }
+      const existing = await callApi(native.alarms, 'get', URGENCY_ALARM).catch(() => null);
+      if (!existing || existing.periodInMinutes !== 5) await callApi(native.alarms, 'create', URGENCY_ALARM, {delayInMinutes: 5, periodInMinutes: 5}).catch(() => {});
+    } finally { alarmReconciliationCount -= 1; }
   }
 
   async function disarmLegacyConfiguration() {
@@ -1047,43 +1297,136 @@
     } catch { /* Startup stays offline when extension storage cannot be read. */ }
   }
 
+  function civilDayInZone(timeZone) {
+    if (typeof timeZone !== 'string' || !timeZone.trim() || timeZone.length > 128 || /[\u0000-\u001f\u007f]/.test(timeZone)) fail('invalid-response');
+    let parts;
+    try {
+      parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(new Date());
+    } catch { fail('invalid-response'); }
+    const values = Object.fromEntries(parts.filter(part => ['year', 'month', 'day'].includes(part.type)).map(part => [part.type, part.value]));
+    if (!/^\d{4}$/.test(values.year || '') || !/^\d{2}$/.test(values.month || '') || !/^\d{2}$/.test(values.day || '')) fail('invalid-response');
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+
+  async function fetchMonitorAgenda(settings, revision, expectedGeneration) {
+    if (revision !== configurationRevision || !(await receptionGenerationMatches(expectedGeneration))) return null;
+    const rootResponse = await fetchResource(settings, baseUrl(settings), {configurationRevision: revision});
+    if (revision !== configurationRevision || !(await receptionGenerationMatches(expectedGeneration))) return null;
+    const root = rootResponse.data;
+    if (!isObject(root) || typeof root.timeZone !== 'string' || !isObject(root._links) || !isObject(root._links.agenda)) fail('invalid-response');
+    exactKeys(root._links.agenda, ['href', 'method'], ['href']);
+    if (root._links.agenda.method !== undefined && root._links.agenda.method !== 'GET') fail('invalid-response');
+    const link = validateDestination(settings, root._links.agenda.href, false);
+    if (link.href.replace(/\/$/, '') !== apiUrl(settings, 'agenda')) fail('invalid-response');
+    const query = new URLSearchParams();
+    query.set('day', civilDayInZone(root.timeZone));
+    query.set('heuristic', MONITOR_HEURISTIC);
+    if (revision !== configurationRevision || !(await receptionGenerationMatches(expectedGeneration))) return null;
+    link.search = query.toString();
+    const agendaResponse = await fetchResource(settings, link.href, {allowQuery: true, configurationRevision: revision});
+    if (revision !== configurationRevision || !(await receptionGenerationMatches(expectedGeneration))) return null;
+    return agendaResponse.data;
+  }
+
+  async function emitNativeNotification(title, message, revision, expectedGeneration = null) {
+    if (!native.notifications || typeof native.notifications.create !== 'function' || revision !== configurationRevision) return;
+    if (expectedGeneration !== null) {
+      try {
+        const latest = await readReceptionState();
+        if (latest.bufferGeneration !== expectedGeneration || revision !== configurationRevision) return;
+      } catch { return; }
+    }
+    const id = `eptask-${Date.now()}-${++nativeNotificationCounter}`;
+    const details = {
+      type: 'basic',
+      iconUrl: native.runtime.getURL('icons/icon-48.png'),
+      title: safeRemoteText(title, ''),
+      message: safeRemoteText(message, ''),
+    };
+    try { await callApi(native.notifications, 'create', id, details); }
+    catch { /* The local copy remains authoritative if the operating system rejects a notification. */ }
+  }
+
+  async function emitNewNotificationBatch(entries, revision, generation) {
+    if (!entries.length) return;
+    const count = entries.length;
+    const title = count === 1 ? 'Nuevo aviso de ElrikPiro' : `${count} avisos nuevos de ElrikPiro`;
+    const summary = entries[0].text || 'Se ha recibido un aviso nuevo.';
+    await emitNativeNotification(title, summary, revision, generation);
+  }
+
+  async function emitUrgentAlert(task, revision, generation, token) {
+    const description = safeRemoteText(task.description, token);
+    await emitNativeNotification('Tarea urgente', description || 'Hay una tarea urgente que requiere atención.', revision, generation);
+  }
+
   async function monitorUrgency() {
-    if (urgencyBusy) return;
-    urgencyBusy = true;
+    if (monitorBusy || alarmReconciliationCount > 0 || startupBusy) return;
+    monitorBusy = true;
     const revision = configurationRevision;
     try {
       const settings = await readStoredSettings(true);
-      const response = await fetchResource(settings, apiUrl(settings, 'agenda'), {});
-      if (revision === configurationRevision) {
-        await updateUrgencyFromAgenda(response.data, settings, revision);
+      if (revision !== configurationRevision) return;
+      const startingState = await readReceptionState();
+      if (revision !== configurationRevision) return;
+      const notificationsResponse = await fetchResource(settings, apiUrl(settings, 'notifications'), {configurationRevision: revision});
+      if (revision !== configurationRevision) return;
+      const snapshot = validateNotificationSnapshot(notificationsResponse.data, settings);
+      const applied = await applyNotificationSnapshot(settings.serverUrl, snapshot, startingState.bufferGeneration, revision);
+      if (applied.cancelled || revision !== configurationRevision) return;
+      if (applied.newEntries.length) {
+        await emitNewNotificationBatch(applied.newEntries, revision, applied.state.bufferGeneration);
         if (revision === configurationRevision) await clearStoredError(revision).catch(() => {});
+        return;
       }
+      const agenda = await fetchMonitorAgenda(settings, revision, applied.state.bufferGeneration);
+      if (!agenda || revision !== configurationRevision) return;
+      await updateUrgencyFromAgenda(agenda, settings, revision);
+      if (revision !== configurationRevision) return;
+      const urgentTasks = agenda?._embedded?.activeUrgentTasks;
+      if (urgentTasks && urgentTasks[0] && urgentTasks[0].context === 'alert') {
+        await emitUrgentAlert(urgentTasks[0], revision, applied.state.bufferGeneration, settings.token);
+      }
+      if (revision === configurationRevision) await clearStoredError(revision).catch(() => {});
     } catch (error) {
       const fault = error instanceof GatewayFault ? error : new GatewayFault('gateway-unavailable');
       if (revision === configurationRevision) {
         if (fault.kind === 'permission-required') await disarmExisting().catch(() => {});
         await recordGatewayError(fault, null, revision).catch(() => {});
       }
-    } finally { urgencyBusy = false; }
+    } finally { monitorBusy = false; }
   }
 
   native.alarms.onAlarm.addListener(alarm => {
     // The old notification alarm is intentionally inert; it must never issue a destructive GET.
-    if (alarm && alarm.name === URGENCY_ALARM) void enqueue(monitorUrgency);
+    if (alarm && alarm.name === URGENCY_ALARM && !startupBusy && alarmReconciliationCount === 0 && !monitorBusy) void monitorUrgency();
   });
 
   async function startup() {
-    await callApi(native.alarms, 'clear', LEGACY_MONITOR_ALARM).catch(() => {});
-    await disarmLegacyConfiguration();
-    await restoreUrgency();
     try {
-      const settings = await storedSettingsOrDefaults();
-      if (settings.monitorEnabled) await reconcileUrgencyAlarm(true);
-      else await reconcileUrgencyAlarm(false);
-    } catch { await reconcileUrgencyAlarm(false); }
+      await callApi(native.alarms, 'clear', LEGACY_MONITOR_ALARM).catch(() => {});
+      await disarmLegacyConfiguration();
+      await restoreUrgency();
+      try {
+        const settings = await storedSettingsOrDefaults();
+        if (settings.monitorEnabled) await reconcileUrgencyAlarm(true);
+        else await reconcileUrgencyAlarm(false);
+      } catch { await reconcileUrgencyAlarm(false); }
+    } finally { startupBusy = false; }
   }
 
-  native.runtime.onInstalled.addListener(() => { void enqueue(startup); });
-  native.runtime.onStartup.addListener(() => { void enqueue(startup); });
-  void enqueue(startup);
+  function scheduleStartup() {
+    if (startupBusy) return;
+    startupBusy = true;
+    void enqueue(startup);
+  }
+
+  native.runtime.onInstalled.addListener(scheduleStartup);
+  native.runtime.onStartup.addListener(scheduleStartup);
+  scheduleStartup();
 })();

@@ -38,11 +38,12 @@ function compileModule(source, moduleId, modules) {
   return `(function(){\n${transformed}\n${returnValue}\n})()`;
 }
 
-function bootManager({ readGateway, submitOperation, initialSettings, initialStatePromise = null, ready = true, focusTarget = null } = {}) {
+function bootManager({ readGateway, submitOperation, initialSettings, initialState = null, initialStatePromise = null, ready = true, focusTarget = null } = {}) {
   const document = loadExtensionDocument();
   document.visibilityState = "visible";
   const reads = [];
   const writes = [];
+  const clearCalls = [];
   const readListeners = new Set();
   const changeListeners = new Set();
   const storageListeners = new Set();
@@ -54,7 +55,9 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
     monitorEnabled: true,
     timeoutMs: 30_000,
   };
-  const statePromise = initialStatePromise || Promise.resolve({ settings: currentSettings, history: [], monitorStatus: null, gatewayError: null });
+  let localState = initialState || { settings: currentSettings, history: [], notificationReception: null, notificationError: "", monitorStatus: null, gatewayError: null };
+  const statePromise = initialStatePromise || Promise.resolve(localState);
+  let initialReadPending = Boolean(initialStatePromise);
   const browserApi = {
     runtime: {
       id: "test-extension-id",
@@ -88,7 +91,13 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
 
   const storage = {
     isReady(settings) { return ready && Boolean(settings?.serverUrl && settings?.token && settings?.monitorEnabled); },
-    async readExtensionState() { return statePromise; },
+    async readExtensionState() {
+      if (initialReadPending) {
+        initialReadPending = false;
+        return statePromise;
+      }
+      return localState;
+    },
     subscribeStorageChanges(listener) {
       storageListeners.add(listener);
       return () => storageListeners.delete(listener);
@@ -106,7 +115,22 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
         error.status = reply?.status ?? null;
         throw error;
       },
-      clearHistory: async () => ({ requestId: "clear", ok: true, status: 200, data: {}, error: null }),
+      clearNotificationBuffer: async () => {
+        clearCalls.push({ operation: "notifications.clear-local" });
+        const reception = localState.notificationReception;
+        const bufferGeneration = (reception?.bufferGeneration || 0) + 1;
+        localState = {
+          ...localState,
+          history: [],
+          notificationReception: reception ? {
+            ...reception,
+            buffer: [],
+            bufferGeneration,
+            ...(reception.continuity ? { continuity: { ...reception.continuity, localTruncated: false } } : {}),
+          } : null,
+        };
+        return { requestId: "clear", ok: true, status: null, data: { cleared: true, bufferGeneration }, error: null };
+      },
     },
     "./storage-view.js": storage,
   };
@@ -163,6 +187,7 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
     document,
     reads,
     writes,
+    clearCalls,
     context,
     get stateLoaded() { return reads.length > 0; },
     async flush(rounds = 8) {
@@ -175,6 +200,12 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
       browserEvents.focus.fire();
     },
     storageChanged(changes = {}) {
+      if (changes["notificationReception.v1"]) {
+        localState = { ...localState, notificationReception: changes["notificationReception.v1"].newValue };
+      }
+      if (changes["notificationHistory.v1"]) {
+        localState = { ...localState, history: changes["notificationHistory.v1"].newValue };
+      }
       for (const listener of [...storageListeners]) listener(changes);
     },
     readListeners,

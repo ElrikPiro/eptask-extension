@@ -322,7 +322,7 @@ export const settingsMessages = Object.freeze({
   clear: () => sendRequest("settings.clear", null, {}),
 });
 
-export const clearHistory = () => sendRequest("history.clear", null, {});
+export const clearNotificationBuffer = () => sendRequest("notifications.clear-local", null, {});
 
 export function assertSuccessfulReply(reply) {
   if (reply?.ok === true) return reply;

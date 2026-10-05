@@ -42,10 +42,12 @@
         <div class="panel-header">
           <div>
             <h2>Historial de notificaciones</h2>
-            <p class="caption">Copia local de las notificaciones recibidas por el monitor. El borrado local todavía no está disponible.</p>
+            <p class="caption">Avisos guardados en este dispositivo. Se pueden consultar aunque no haya conexión.</p>
           </div>
-          <button id="clear-history" type="button" class="secondary" disabled>Vaciar copia local</button>
+          <button id="clear-history" type="button" class="secondary" disabled>Vaciar avisos guardados</button>
         </div>
+        <p id="notification-monitor-status" class="status-line offline-text" role="status" aria-live="polite">Cargando estado de recepción…</p>
+        <div id="notification-continuity" class="notification-continuity" aria-live="polite" hidden></div>
         <ul id="notification-list" class="notification-list"><li class="empty">Sin notificaciones guardadas.</li></ul>
       </section>
     </div>
