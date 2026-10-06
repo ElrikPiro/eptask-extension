@@ -384,6 +384,242 @@ test("a task draft remains tied to its original ID across selection, refresh, fo
   assert.equal(manager.writes.some((write) => write.type === "tasks.patch"), false);
 });
 
+test("a confirmed task edit refreshes only its visible detail and loads stale collections when opened", async () => {
+  const fixture = serverFixture();
+  let manager;
+  manager = bootManager({
+    readGateway: fixture.readGateway,
+    submitOperation: async (type, target, parameters) => {
+      manager.invalidate({ taskIds: [target.id], projectNames: [], eventNames: [], collections: ["tasks", "agenda", "statistics", "events"] });
+      return {
+        id: "operation-edit-task",
+        status: "succeeded",
+        type,
+        target,
+        parameters,
+        result: { type, target, affectedIds: [target.id], effectsState: "complete" },
+        failure: null,
+      };
+    },
+  });
+  await manager.flush();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const beforeWrite = manager.reads.length;
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const description = form.elements.namedItem("changes.description");
+  description.value = "Updated description";
+  description.dispatchEvent({ type: "input", bubbles: true });
+  form.submit();
+  await manager.flush();
+
+  assert.equal(manager.writes.length, 1, "the confirmed mutation is sent once");
+  assert.deepEqual(manager.reads.slice(beforeWrite).map((read) => read.operation), ["tasks.get"], "the visible detail is refreshed once without reloading hidden collections");
+  assert.match(manager.document.querySelector("#app-message").textContent, /Cambios guardados/);
+
+  for (const [label, operation] of [[/^tareas$/i, "tasks.list"], [/agenda/i, "agenda.read"], [/estadística|estadísticas/i, "statistics.read"], [/eventos/i, "events.list"]]) {
+    const beforeOpen = manager.reads.filter((read) => read.operation === operation).length;
+    navByText(manager.document, label).click();
+    await manager.flush();
+    assert.equal(manager.reads.filter((read) => read.operation === operation).length, beforeOpen + 1, `${operation} is refreshed before its view is shown`);
+  }
+});
+
+test("a failed visible refresh keeps the confirmed operation and concurrent hidden invalidation", async () => {
+  const delayedDetail = deferred();
+  const fixture = serverFixture({ taskGetHandler: async (id, count) => id === "task-a" && count === 2 ? delayedDetail.promise : undefined });
+  let manager;
+  manager = bootManager({
+    readGateway: fixture.readGateway,
+    submitOperation: async (type, target, parameters) => {
+      manager.invalidate({ taskIds: [target.id], projectNames: [], eventNames: [], collections: ["tasks", "agenda", "statistics", "events"] });
+      return {
+        id: "operation-edit-task",
+        status: "succeeded",
+        type,
+        target,
+        parameters,
+        result: { type, target, affectedIds: [target.id], effectsState: "complete" },
+        failure: null,
+      };
+    },
+  });
+  await manager.flush();
+  navByText(manager.document, /proyecto|project/i).click();
+  await manager.flush();
+  navByText(manager.document, /^tareas$/i).click();
+  await manager.flush();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const description = form.elements.namedItem("changes.description");
+  description.value = "Saved once";
+  description.dispatchEvent({ type: "input", bubbles: true });
+  form.submit();
+  await manager.flush();
+  assert.equal(manager.reads.filter((read) => read.operation === "tasks.get").length, 2, "the post-write detail refresh is pending");
+
+  manager.invalidate({ taskIds: [], projectNames: ["Project A"], eventNames: [], collections: ["projects"] });
+  const unavailable = new Error("detail refresh failed");
+  delayedDetail.reject(unavailable);
+  await manager.flush(16);
+
+  assert.equal(manager.writes.length, 1, "a confirmed mutation is never retried because a follow-up read failed");
+  assert.match(manager.document.querySelector("#app-message").textContent, /se confirmó|confirmaron/i);
+  assert.equal(manager.document.querySelector("#action-form-edit-task"), null, "actions remain hidden while the selected detail is stale");
+  const projectsBeforeOpen = manager.reads.filter((read) => read.operation === "projects.list").length;
+  navByText(manager.document, /proyecto|project/i).click();
+  await manager.flush();
+  assert.equal(manager.reads.filter((read) => read.operation === "projects.list").length, projectsBeforeOpen + 1, "the concurrent project invalidation remains pending until that view is opened");
+});
+
+test("a second task invalidation during the post-write read is reloaded before actions return", async () => {
+  const oldDetail = deferred();
+  const fixture = serverFixture({
+    taskGetHandler: async (id, count, resource) => {
+      if (id !== "task-a") return undefined;
+      if (count === 2) return oldDetail.promise;
+      if (count === 3) return { ...structuredClone(resource), description: "Latest remote task" };
+      return undefined;
+    },
+  });
+  let manager;
+  manager = bootManager({
+    readGateway: fixture.readGateway,
+    submitOperation: async (type, target, parameters) => {
+      manager.invalidate({ taskIds: [target.id], projectNames: [], eventNames: [], collections: ["tasks", "agenda", "statistics", "events"] });
+      return {
+        id: "operation-edit-task",
+        status: "succeeded",
+        type,
+        target,
+        parameters,
+        result: { type, target, affectedIds: [target.id], effectsState: "complete" },
+        failure: null,
+      };
+    },
+  });
+  await manager.flush();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const description = form.elements.namedItem("changes.description");
+  description.value = "Local edit";
+  description.dispatchEvent({ type: "input", bubbles: true });
+  form.submit();
+  await manager.flush();
+  assert.equal(manager.reads.filter((read) => read.operation === "tasks.get").length, 2);
+
+  manager.invalidate({ taskIds: ["task-a"], projectNames: [], eventNames: [], collections: ["tasks"] });
+  oldDetail.resolve({ ...taskResource("task-a"), description: "Obsolete snapshot" });
+  await manager.flush(16);
+
+  assert.equal(manager.writes.length, 1, "the confirmed edit is not repeated while resolving a newer snapshot");
+  assert.equal(manager.reads.filter((read) => read.operation === "tasks.get").length, 3);
+  assert.match(manager.document.querySelector("#task-detail").textContent, /Latest remote task/);
+  assert.ok(manager.document.querySelector("#action-form-edit-task"), "actions return only after the current detail is loaded");
+  assert.match(manager.document.querySelector("#app-message").textContent, /más recientes/);
+});
+
+test("event-name-only invalidations supersede an in-flight event read", async () => {
+  const oldRead = deferred();
+  const newerRead = deferred();
+  const fixture = serverFixture();
+  let eventRequest = 0;
+  const readGateway = async (operation, target, parameters) => {
+    if (operation !== "events.list") return fixture.readGateway(operation, target, parameters);
+    eventRequest += 1;
+    if (eventRequest === 2) return oldRead.promise;
+    if (eventRequest === 3) return newerRead.promise;
+    return fixture.readGateway(operation, target, parameters);
+  };
+  const manager = bootManager({ readGateway });
+  await manager.flush();
+  navByText(manager.document, /eventos/i).click();
+  await manager.flush();
+  manager.invalidate({ taskIds: [], projectNames: [], eventNames: ["release-ready"], collections: [] });
+  await manager.flush();
+  manager.invalidate({ taskIds: [], projectNames: [], eventNames: ["release-ready"], collections: [] });
+  await manager.flush();
+
+  const current = eventsResource();
+  current._embedded.events[0].name = "new-release-event";
+  newerRead.resolve(current);
+  await manager.flush();
+  assert.match(manager.document.querySelector("#main-view").textContent, /new-release-event/);
+  const obsolete = eventsResource();
+  obsolete._embedded.events[0].name = "obsolete-release-event";
+  oldRead.resolve(obsolete);
+  await manager.flush();
+
+  assert.match(manager.document.querySelector("#main-view").textContent, /new-release-event/);
+  assert.doesNotMatch(manager.document.querySelector("#main-view").textContent, /obsolete-release-event/);
+});
+
+test("a published inline action keeps its confirmed state while a newer event snapshot loads", async () => {
+  const oldEvents = deferred();
+  const fixture = serverFixture();
+  let eventRead = 0;
+  const readGateway = async (operation, target, parameters) => {
+    if (operation !== "events.list") return fixture.readGateway(operation, target, parameters);
+    eventRead += 1;
+    if (eventRead === 2) return oldEvents.promise;
+    if (eventRead === 3) {
+      const current = eventsResource();
+      current._embedded.events[0].name = "latest-release-event";
+      return current;
+    }
+    return fixture.readGateway(operation, target, parameters);
+  };
+  let manager;
+  manager = bootManager({
+    readGateway,
+    submitOperation: async (type, target, parameters) => {
+      manager.invalidate({ taskIds: [], projectNames: [], eventNames: [target.id], collections: ["tasks", "agenda", "statistics", "events"] });
+      return {
+        id: "operation-raise-event",
+        status: "succeeded",
+        type,
+        target,
+        parameters,
+        result: { type, target, affectedIds: [], effectsState: "complete" },
+        failure: null,
+      };
+    },
+  });
+  await manager.flush();
+  navByText(manager.document, /eventos/i).click();
+  await manager.flush();
+  manager.document.querySelector('[data-operation-name="raise-event"]').click();
+  await manager.flush();
+  assert.equal(eventRead, 2, "the published action waits for the first visible events refresh");
+
+  manager.invalidate({ taskIds: [], projectNames: [], eventNames: ["release-ready"], collections: ["events"] });
+  oldEvents.resolve(eventsResource());
+  await manager.flush(16);
+
+  assert.equal(manager.writes.length, 1, "a later invalidation does not resubmit the inline action");
+  assert.equal(eventRead, 3, "the latest event snapshot is fetched after the earlier response is discarded");
+  assert.match(manager.document.querySelector("#main-view").textContent, /latest-release-event/);
+  assert.match(manager.document.querySelector("#app-message").textContent, /más recientes/);
+});
+
+test("a task-collection invalidation refreshes the selected detail even when another task changed", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const detailReads = manager.reads.filter((read) => read.operation === "tasks.get").length;
+  manager.invalidate({ taskIds: ["task-b"], projectNames: [], eventNames: [], collections: ["tasks"] });
+  await manager.flush();
+
+  assert.equal(manager.reads.filter((read) => read.operation === "tasks.get").length, detailReads + 1);
+  assert.equal(manager.document.querySelector("#action-form-edit-task")?.dataset.taskId, "task-a");
+  const listReads = manager.reads.filter((read) => read.operation === "tasks.list").length;
+  navByText(manager.document, /^tareas$/i).click();
+  await manager.flush();
+  assert.equal(manager.reads.filter((read) => read.operation === "tasks.list").length, listReads + 1, "the stale collection is loaded before showing task rows");
+});
+
 test("completed tasks omit completion and the edit form excludes identity, status, and derived effort", async () => {
   const manager = await bootFixture();
   chooseValues(manager.document.querySelector("#task-filters"), ["All Tasks"]);

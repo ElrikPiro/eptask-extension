@@ -54,6 +54,8 @@ La página principal carga tareas, agenda, estadísticas, eventos, estrategias y
 
 Las acciones y sus campos proceden de las capacidades anunciadas por cada recurso. Las ediciones de una tarea combinan cambios de propiedades y esfuerzo en una sola operación. Los campos de identidad, estado y esfuerzo derivado no se envían como cambios. Abrir otro recurso, actualizar datos, recibir una invalidación o volver a la página no cambia el destino ni descarta un borrador; se puede cargar la versión remota conservando el borrador o descartarlo de forma explícita. Las mutaciones confirmadas actualizan las vistas con sus propios parámetros. Los resultados inciertos no se reenvían automáticamente.
 
+Después de confirmar una acción, el gestor actualiza primero los datos que están a la vista. Las demás vistas afectadas se recargan al abrirlas y no muestran acciones hasta tener datos actuales. Si llega otro cambio mientras una lectura está en curso, el gestor descarta la respuesta anterior y conserva pendiente la actualización más reciente.
+
 El coste restante mostrado es el valor `totalCost` recibido del servidor. La interfaz no vuelve a descontar el trabajo registrado ni altera cantidades recibidas.
 
 Los IDs declarados (`id` en JSON o `[id:: …]` en Markdown) se mantienen. Si falta uno, el backend calcula un respaldo MD5 a partir de la descripción, la ruta del archivo y la posición física; la primera escritura lo fija. Un ID duplicado impide identificar el recurso de forma única. La extensión conserva los IDs opacos recibidos, salvo `.` y `..`, que se rechazan antes de una petición porque podrían cambiar el destino al usarse como segmentos de ruta. Los mensajes antiguos de comando se rechazan sin contactar con el servidor.

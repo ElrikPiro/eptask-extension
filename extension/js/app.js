@@ -6,6 +6,20 @@ import { emptyState, formatAmount, formatTimestamp, humanField, keyValuePanel, n
 const DEFAULT_FILTER = "All active task filter";
 const DEFAULT_ALGORITHM = "GTD Algorithm";
 const DEFAULT_HEURISTIC = "Remaining Effort(1)";
+const VIEW_COLLECTIONS = Object.freeze({
+  tasks: "tasks",
+  agenda: "agenda",
+  stats: "statistics",
+  events: "events",
+  projects: "projects",
+});
+const COLLECTION_READ_KEYS = Object.freeze({
+  tasks: "tasks.list",
+  agenda: "agenda",
+  statistics: "statistics",
+  events: "events",
+  projects: "projects.list",
+});
 const ACTION_LABELS = {
   "create-task": "Crear tarea",
   "edit-task": "Guardar cambios",
@@ -61,6 +75,11 @@ const state = {
   historyClearPending: false,
   busy: false,
   view: "tasks",
+  staleCollections: new Set(),
+  collectionErrors: Object.create(null),
+  staleTaskDetails: new Set(),
+  staleProjectDetails: new Set(),
+  invalidationVersions: Object.create(null),
   views: {
     tasks: defaultTaskView(),
     stats: defaultTaskView(),
@@ -86,6 +105,8 @@ const state = {
   pendingFresh: Object.create(null),
   pendingRemoteRefresh: false,
   pendingChanges: { taskIds: [], projectNames: [], eventNames: [], collections: [] },
+  pendingRefreshAll: false,
+  confirmedOperationPendingRefresh: false,
   pendingConnectionReload: false,
 };
 
@@ -230,16 +251,90 @@ async function readResource(operation, target = null, parameters = {}) {
   return assertSuccessfulReply(reply).data;
 }
 
+function collectionForView(view) {
+  return VIEW_COLLECTIONS[view] || null;
+}
+
+function bumpInvalidationVersion(key) {
+  state.invalidationVersions[key] = (state.invalidationVersions[key] || 0) + 1;
+}
+
+function markChangesStale(change = {}) {
+  const collections = new Set(change.collections || []);
+  for (const collection of collections) {
+    state.staleCollections.add(collection);
+    const readKey = COLLECTION_READ_KEYS[collection];
+    if (readKey) bumpInvalidationVersion(readKey);
+  }
+  const taskIds = new Set(change.taskIds || []);
+  if (change.target?.kind === "task" && typeof change.target.id === "string") taskIds.add(change.target.id);
+  for (const id of taskIds) {
+    if (typeof id !== "string" || !id) continue;
+    state.staleTaskDetails.add(id);
+    bumpInvalidationVersion(`task:${id}`);
+  }
+  const projectNames = new Set(change.projectNames || []);
+  if (change.target?.kind === "project" && typeof change.target.id === "string") projectNames.add(change.target.id);
+  for (const name of projectNames) {
+    if (typeof name !== "string" || !name) continue;
+    state.staleProjectDetails.add(name);
+    bumpInvalidationVersion(`project:${name}`);
+  }
+  if ((change.eventNames || []).some((name) => typeof name === "string" && name) || change.target?.kind === "event") {
+    state.staleCollections.add("events");
+    if (!collections.has("events")) bumpInvalidationVersion("events");
+  }
+}
+
+function markLoadedResourcesStale() {
+  for (const [collection, value] of Object.entries({
+    tasks: state.taskList,
+    agenda: state.agenda,
+    statistics: state.stats,
+    events: state.events,
+    projects: state.projects,
+  })) {
+    if (value || collectionForView(state.view) === collection) {
+      state.staleCollections.add(collection);
+      const readKey = COLLECTION_READ_KEYS[collection];
+      if (readKey) bumpInvalidationVersion(readKey);
+    }
+  }
+  const taskIds = new Set([...Object.keys(state.taskDetails), ...Object.keys(state.latestTaskDetails)]);
+  const projectNames = new Set([...Object.keys(state.projectDetails), ...Object.keys(state.latestProjectDetails)]);
+  for (const draft of Object.values(state.drafts)) {
+    if (!isDraftScopeCurrent(draft?.scope)) continue;
+    if (draft.scope.kind === "task" && draft.scope.id) taskIds.add(draft.scope.id);
+    if (draft.scope.kind === "project" && draft.scope.id) projectNames.add(draft.scope.id);
+  }
+  if (state.selectedTaskId) taskIds.add(state.selectedTaskId);
+  if (state.selectedProjectName) projectNames.add(state.selectedProjectName);
+  for (const id of taskIds) {
+    state.staleTaskDetails.add(id);
+    bumpInvalidationVersion(`task:${id}`);
+  }
+  for (const name of projectNames) {
+    state.staleProjectDetails.add(name);
+    bumpInvalidationVersion(`project:${name}`);
+  }
+}
+
 function beginRead(key) {
   const sequence = (state.readSequences[key] || 0) + 1;
   state.readSequences[key] = sequence;
-  return { sequence, settingsRevision: state.settingsRevision, endpointKey: state.endpointKey };
+  return {
+    sequence,
+    settingsRevision: state.settingsRevision,
+    endpointKey: state.endpointKey,
+    invalidationVersion: state.invalidationVersions[key] || 0,
+  };
 }
 
 function isLatestRead(key, request) {
   return state.readSequences[key] === request.sequence &&
     state.settingsRevision === request.settingsRevision &&
-    state.endpointKey === request.endpointKey;
+    state.endpointKey === request.endpointKey &&
+    (state.invalidationVersions[key] || 0) === request.invalidationVersion;
 }
 
 async function readSequenced(key, request, operation, target, parameters, isViewCurrent = () => true) {
@@ -275,10 +370,16 @@ async function perform(label, work, { silent = false } = {}) {
       state.pendingConnectionReload = false;
       void reloadConnectedResources();
     } else if (state.pendingRemoteRefresh && isReady(state.settings)) {
-      state.pendingRemoteRefresh = false;
-      const pending = state.pendingChanges;
-      state.pendingChanges = { taskIds: [], projectNames: [], eventNames: [], collections: [] };
-      void refreshLoadedData(pending).catch(() => {});
+      const pending = takePendingChanges();
+      void perform("Actualizando datos", async () => {
+        const complete = await refreshLoadedData(pending);
+        renderMainView();
+        if (state.confirmedOperationPendingRefresh) {
+          if (complete) showMessage("La acción se confirmó y se cargaron los datos visibles más recientes.");
+          else showMessage(`La acción se confirmó, pero los datos visibles siguen pendientes. ${visibleRefreshError()}`, "error");
+          state.confirmedOperationPendingRefresh = false;
+        } else if (!complete && changeTouchesCurrentResources(pending)) showMessage(visibleRefreshError(), "error");
+      }, { silent: true });
     }
   }
 }
@@ -367,6 +468,8 @@ async function loadTaskList({ render = false } = {}) {
     () => signature === JSON.stringify(taskViewParameters(state.views.tasks)));
   if (!isTaskCollection(data)) throw new Error("El servidor devolvió una lista de tareas no válida.");
   state.taskList = data;
+  state.staleCollections.delete("tasks");
+  delete state.collectionErrors.tasks;
   if (render) renderMainView();
   return data;
 }
@@ -377,6 +480,7 @@ async function loadTaskDetail(taskId, { applyFresh = false } = {}) {
   const request = beginRead(readKey);
   const data = await readSequenced(readKey, request, "tasks.get", { kind: "task", id: taskId }, {});
   if (!isTaskResource(data) || data.id !== taskId) throw new Error("El detalle no corresponde a la tarea solicitada.");
+  state.staleTaskDetails.delete(taskId);
   delete state.taskDetailErrors[taskId];
   const current = state.taskDetails[taskId];
   if (current && resourcesDiffer(current, data) && hasDirtyDraft("task", taskId) && !applyFresh) {
@@ -401,6 +505,8 @@ async function loadAgenda() {
     () => signature === JSON.stringify({ day: state.views.agenda.day, heuristic: state.views.agenda.heuristic }));
   if (!isAgendaResource(data)) throw new Error("El servidor devolvió una agenda no válida.");
   state.agenda = data;
+  state.staleCollections.delete("agenda");
+  delete state.collectionErrors.agenda;
   return data;
 }
 
@@ -412,6 +518,8 @@ async function loadStats() {
     () => signature === JSON.stringify(taskViewParameters(state.views.stats)));
   if (!data || typeof data !== "object" || !data.workload || !data.slack || !data.remainingEffort) throw new Error("El servidor devolvió estadísticas no válidas.");
   state.stats = data;
+  state.staleCollections.delete("statistics");
+  delete state.collectionErrors.statistics;
   return data;
 }
 
@@ -420,6 +528,8 @@ async function loadEvents() {
   const data = await readSequenced("events", request, "events.list", null, {});
   if (!data || typeof data !== "object" || !Array.isArray(data._embedded?.events)) throw new Error("El servidor devolvió eventos no válidos.");
   state.events = data;
+  state.staleCollections.delete("events");
+  delete state.collectionErrors.events;
   return data;
 }
 
@@ -456,6 +566,8 @@ async function loadProjects() {
     () => signature === JSON.stringify({ status: state.views.projects.status }));
   if (!data || typeof data !== "object" || !Array.isArray(data._embedded?.projects)) throw new Error("El servidor devolvió proyectos no válidos.");
   state.projects = data;
+  state.staleCollections.delete("projects");
+  delete state.collectionErrors.projects;
   return data;
 }
 
@@ -465,6 +577,7 @@ async function loadProjectDetail(name, { applyFresh = false } = {}) {
   const request = beginRead(readKey);
   const data = await readSequenced(readKey, request, "projects.get", { kind: "project", id: name }, {});
   if (!data || typeof data !== "object" || data.name !== name || !Array.isArray(data.actions)) throw new Error("El detalle no corresponde al proyecto solicitado.");
+  state.staleProjectDetails.delete(name);
   delete state.projectDetailErrors[name];
   const current = state.projectDetails[name];
   if (current && resourcesDiffer(current, data) && hasDirtyDraft("project", name) && !applyFresh) {
@@ -484,6 +597,21 @@ function renderMainView() {
     const section = panel("Gestor de tareas");
     section.append(emptyState("Abre Configuración, guarda los datos del servidor y conecta."));
     mainView.replaceChildren(section);
+    return;
+  }
+
+  const visibleCollection = collectionForView(state.view);
+  if (visibleCollection && state.staleCollections.has(visibleCollection)) {
+    const fragment = document.createDocumentFragment();
+    const draftNotice = renderDraftNotice();
+    if (draftNotice) fragment.append(draftNotice);
+    if (state.view === "tasks") fragment.append(renderTaskViewControls("tasks", state.views.tasks, true));
+    const section = panel("Datos pendientes de actualizar", "full");
+    if (state.collectionErrors[visibleCollection]) section.append(node("p", state.collectionErrors[visibleCollection], "alert error"));
+    section.append(emptyState("Esta vista cambió en el servidor y se volverá a cargar antes de mostrar sus acciones."));
+    fragment.append(section);
+    mainView.replaceChildren(fragment);
+    updateConnection();
     return;
   }
 
@@ -685,6 +813,11 @@ function renderSelectedTaskPanel(taskId) {
   toolbar.append(title, actionButton("Actualizar datos", "reload"));
   section.append(toolbar);
   section.dataset.selectedTaskId = taskId;
+  if (state.staleTaskDetails.has(taskId)) {
+    if (state.taskDetailErrors[taskId]) section.append(node("p", state.taskDetailErrors[taskId], "alert error"));
+    else section.append(emptyState("Los datos de esta tarea están pendientes de actualizar. Sus acciones volverán a aparecer al cargar la versión actual."));
+    return section;
+  }
   if (state.taskDetailErrors[taskId]) section.append(node("p", state.taskDetailErrors[taskId], "alert error"));
   if (!task) {
     section.append(emptyState("Cargando el detalle de la tarea…"));
@@ -931,6 +1064,11 @@ function renderProjectDetail(name) {
   const project = state.projectDetails[name];
   const section = panel("Detalle del proyecto", "full project-detail");
   section.dataset.projectName = name;
+  if (state.staleProjectDetails.has(name)) {
+    if (state.projectDetailErrors[name]) section.append(node("p", state.projectDetailErrors[name], "alert error"));
+    else section.append(emptyState("Los datos de este proyecto están pendientes de actualizar. Sus acciones volverán a aparecer al cargar la versión actual."));
+    return section;
+  }
   if (state.projectDetailErrors[name]) section.append(node("p", state.projectDetailErrors[name], "alert error"));
   if (!project) {
     section.append(emptyState("Cargando el detalle del proyecto…"));
@@ -1366,9 +1504,13 @@ async function submitPublishedAction(action, resource, scope, key, form, resourc
         showMessage("La acción se confirmó en la conexión anterior. No se consultaron esos identificadores en la conexión actual.");
         return;
       }
-      await afterSuccessfulOperation(action.name, target, receipt);
+      const refreshed = await afterSuccessfulOperation(action.name, target, receipt);
       renderMainView();
-      showMessage(`${actionLabel(action.name)} completado para ${target.id || "el recurso"}.`);
+      if (refreshed === true) showMessage(`${actionLabel(action.name)} completado para ${target.id || "el recurso"}.`);
+      else if (refreshed === null) {
+        state.confirmedOperationPendingRefresh = true;
+        showMessage("La acción se confirmó. Cargando los cambios más recientes antes de volver a habilitar las acciones.");
+      } else showMessage(`${actionLabel(action.name)} se confirmó, pero no se pudieron actualizar los datos visibles. Actualiza la vista antes de continuar.`, "error");
     });
   } catch (error) {
     showMessage(error instanceof Error ? error.message : "No se pudo enviar el formulario.", "error");
@@ -1395,9 +1537,13 @@ async function submitEditTask(action, task, key, form) {
         showMessage("Los cambios se confirmaron en la conexión anterior. No se consultó esta tarea en la conexión actual.");
         return;
       }
-      await afterSuccessfulOperation("edit-task", { kind: "task", id: task.id }, receipt);
+      const refreshed = await afterSuccessfulOperation("edit-task", { kind: "task", id: task.id }, receipt);
       renderMainView();
-      showMessage(`Cambios guardados para «${task.description}».`);
+      if (refreshed === true) showMessage(`Cambios guardados para «${task.description}».`);
+      else if (refreshed === null) {
+        state.confirmedOperationPendingRefresh = true;
+        showMessage("Los cambios se confirmaron. Cargando los cambios más recientes antes de volver a habilitar las acciones.");
+      } else showMessage("Los cambios se confirmaron, pero no se pudo actualizar la tarea visible. Actualiza la vista antes de continuar.", "error");
     });
   } catch (error) {
     showMessage(error instanceof Error ? error.message : "No se pudieron guardar los cambios.", "error");
@@ -1405,15 +1551,38 @@ async function submitEditTask(action, task, key, form) {
 }
 
 async function afterSuccessfulOperation(operationName, target, receipt) {
+  const pending = takePendingChanges();
+  const result = receipt?.data?.result || {};
+  const affected = Array.isArray(result.affectedIds) ? result.affectedIds.filter((id) => typeof id === "string") : [];
   const collections = operationName === "raise-event" ? ["tasks", "agenda", "events", "statistics"] :
     ["create-task", "edit-task", "complete-task", "schedule-task", "record-work", "snooze-task"].includes(operationName) ? ["tasks", "agenda", "statistics", "events"] : ["projects"];
-  const affected = receipt?.data?.result?.affectedIds || [];
-  const refreshed = await refreshLoadedData({ collections, target, affected });
+  const changes = {
+    collections: [...new Set([...collections, ...pending.collections])],
+    taskIds: [...new Set([...pending.taskIds, ...(target?.kind === "task" ? [target.id] : []), ...(target?.kind === "tasks" || operationName === "raise-event" ? affected : [])])],
+    projectNames: [...new Set([...pending.projectNames, ...(target?.kind === "project" ? [target.id] : []), ...(target?.kind === "project" ? affected : [])])],
+    eventNames: [...new Set([...pending.eventNames, ...(target?.kind === "event" ? [target.id] : [])])],
+    target,
+    affected,
+    refreshAll: pending.refreshAll,
+  };
+
   if (operationName === "create-task") {
-    const createdId = receipt?.data?.result?.value?.id || receipt?.data?.result?.affectedIds?.[0];
-    if (typeof createdId === "string") await selectTask(createdId, { announce: false });
+    const createdId = result.value?.id || affected[0];
+    if (typeof createdId === "string" && createdId) {
+      state.selectedTaskId = createdId;
+      state.view = "detail";
+      changes.taskIds = [...new Set([...changes.taskIds, createdId])];
+    }
   }
-  return refreshed;
+  markChangesStale(changes);
+  if (changes.refreshAll) markLoadedResourcesStale();
+  renderMainView();
+  showMessage("La acción se confirmó. Actualizando los datos que estás viendo.");
+  const refreshed = changes.refreshAll
+    ? await refreshLoadedData(changes)
+    : await refreshVisibleResources(changes);
+  renderMainView();
+  return refreshed ? true : state.pendingRemoteRefresh ? null : false;
 }
 
 function renderDraftForResource(key) {
@@ -1440,7 +1609,9 @@ async function handleActionButton(button) {
       await refreshLocalNotifications();
       const complete = await refreshLoadedData();
       renderMainView();
-      showMessage(complete ? "Datos actualizados. Los borradores de esta pantalla se conservaron." : "No se pudieron actualizar todos los datos. Se conservaron los datos y borradores disponibles.", complete ? "info" : "error");
+      showMessage(complete
+        ? "Vista actualizada. Las demás se cargarán al abrirlas; se conservaron los borradores."
+        : "No se pudieron actualizar todos los datos visibles. Se conservaron los borradores y la vista seguirá protegida hasta cargarla.", complete ? "info" : "error");
     });
   } else if (action === "previous-page") {
     if (state.views.tasks.page <= 1) return;
@@ -1507,9 +1678,13 @@ async function handleActionButton(button) {
         showMessage("La acción se confirmó en la conexión anterior; no se actualizaron datos de la conexión actual.");
         return;
       }
-      await afterSuccessfulOperation(operationName, target, receipt);
+      const refreshed = await afterSuccessfulOperation(operationName, target, receipt);
       renderMainView();
-      showMessage(`${actionLabel(operationName)} completado.`);
+      if (refreshed === true) showMessage(`${actionLabel(operationName)} completado.`);
+      else if (refreshed === null) {
+        state.confirmedOperationPendingRefresh = true;
+        showMessage(`${actionLabel(operationName)} se confirmó. Cargando los cambios más recientes antes de volver a habilitar las acciones.`);
+      } else showMessage(`${actionLabel(operationName)} se confirmó, pero no se pudieron actualizar los datos visibles. Actualiza la vista antes de continuar.`, "error");
     });
   }
 }
@@ -1553,6 +1728,7 @@ async function selectProject(name) {
   renderMainView();
   await perform("Abriendo proyecto", async () => {
     try {
+      if (!state.projects || state.staleCollections.has("projects")) await loadProjects();
       await loadProjectDetail(name);
       renderMainView();
       showMessage(`Proyecto abierto: ${name}.`);
@@ -1568,46 +1744,115 @@ async function selectProject(name) {
 
 async function refreshLoadedData(change = null) {
   if (!isReady(state.settings)) return;
-  if (!state.timeZone) await loadRoot();
-  const collections = new Set(change?.collections || []);
-  const changedTaskIds = new Set(change?.taskIds || []);
-  const changedProjectNames = new Set(change?.projectNames || []);
-  const changedEventNames = new Set(change?.eventNames || []);
-  const should = (collection) => collections.has(collection);
+  if (!change) {
+    markLoadedResourcesStale();
+    renderMainView();
+  }
+  const complete = await refreshVisibleResources(change ? { ...change, forceVisible: Boolean(change.refreshAll) } : { forceVisible: true });
+  renderMainView();
+  return complete;
+}
+
+function visibleRefreshError() {
+  if (state.view === "detail" && state.selectedTaskId && state.taskDetailErrors[state.selectedTaskId]) return state.taskDetailErrors[state.selectedTaskId];
+  if (state.view === "projects" && state.selectedProjectName && state.projectDetailErrors[state.selectedProjectName]) return state.projectDetailErrors[state.selectedProjectName];
+  const collection = collectionForView(state.view);
+  if (collection && state.collectionErrors[collection]) return state.collectionErrors[collection];
+  return "Hay datos nuevos que no se pudieron cargar. Actualiza la vista antes de continuar.";
+}
+
+function changeTouchesCurrentResources(change) {
+  if (!change) return true;
+  if (change.refreshAll || change.forceVisible) return true;
+  const collection = collectionForView(state.view);
+  if (collection && changeAffectsCollection(change, collection)) return true;
+  if ((state.view === "detail" || state.view === "agenda") && state.selectedTaskId &&
+    (change.collections?.includes("tasks") || (change.taskIds || []).includes(state.selectedTaskId) || change.target?.kind === "task" && change.target.id === state.selectedTaskId)) return true;
+  if (state.view === "projects" && state.selectedProjectName &&
+    ((change.projectNames || []).includes(state.selectedProjectName) || change.target?.kind === "project" && change.target.id === state.selectedProjectName)) return true;
+  return false;
+}
+
+function changeAffectsCollection(change, collection) {
+  if ((change.collections || []).includes(collection)) return true;
+  if (collection === "events") return Boolean((change.eventNames || []).length || change.target?.kind === "event");
+  if (collection === "tasks") return Boolean((change.taskIds || []).length || change.target?.kind === "task");
+  if (collection === "projects") return Boolean((change.projectNames || []).length || change.target?.kind === "project");
+  return false;
+}
+
+function markTaskDetailStale(id) {
+  if (!id || state.staleTaskDetails.has(id)) return;
+  state.staleTaskDetails.add(id);
+  bumpInvalidationVersion(`task:${id}`);
+}
+
+function markProjectDetailStale(name) {
+  if (!name || state.staleProjectDetails.has(name)) return;
+  state.staleProjectDetails.add(name);
+  bumpInvalidationVersion(`project:${name}`);
+}
+
+async function refreshVisibleResources(change = {}) {
+  if (!isReady(state.settings)) return false;
+  const collections = new Set(change.collections || []);
+  const taskIds = new Set(change.taskIds || []);
+  const projectNames = new Set(change.projectNames || []);
+  const target = change.target;
+  const visibleTaskDetail = state.view === "detail" || state.view === "agenda";
+  const visibleProjectDetail = state.view === "projects";
+  if (state.selectedTaskId && visibleTaskDetail && (collections.has("tasks") || taskIds.has(state.selectedTaskId) || (target?.kind === "task" && target.id === state.selectedTaskId))) {
+    markTaskDetailStale(state.selectedTaskId);
+  }
+  if (state.selectedProjectName && visibleProjectDetail && (collections.has("projects") || projectNames.has(state.selectedProjectName) || (target?.kind === "project" && target.id === state.selectedProjectName))) {
+    markProjectDetailStale(state.selectedProjectName);
+  }
+
   const jobs = [];
-  if (state.taskList || state.view === "tasks" || should("tasks") || changedTaskIds.size) jobs.push(loadTaskList());
-  if (state.agenda || state.view === "agenda" || should("agenda") || changedTaskIds.size) jobs.push(loadAgenda());
-  if (state.stats || state.view === "stats" || should("statistics") || should("tasks")) jobs.push(loadStats());
-  if (state.events || state.view === "events" || should("events") || changedEventNames.size) jobs.push(loadEvents());
-  if (state.projects || state.view === "projects" || should("projects") || changedProjectNames.size) jobs.push(loadProjects());
-  const taskIds = new Set(changedTaskIds);
-  if (change?.target?.kind === "task" && typeof change.target.id === "string") taskIds.add(change.target.id);
-  if (change?.target?.kind === "task") for (const id of change?.affected || []) if (typeof id === "string") taskIds.add(id);
-  if (state.selectedTaskId) taskIds.add(state.selectedTaskId);
-  for (const [, draft] of Object.entries(state.drafts)) if (isDraftScopeCurrent(draft.scope) && draft.scope?.kind === "task" && draft.scope.id && (changedTaskIds.has(draft.scope.id) || should("tasks"))) taskIds.add(draft.scope.id);
-  for (const id of taskIds) jobs.push(loadTaskDetail(id).catch((error) => {
-    if (!error?.supersededRead) state.taskDetailErrors[id] = error instanceof Error ? error.message : "No se pudo actualizar el detalle.";
-    throw error;
-  }));
-  const projectNames = new Set(changedProjectNames);
-  if (change?.target?.kind === "project" && typeof change.target.id === "string") projectNames.add(change.target.id);
-  if (change?.target?.kind === "project") for (const name of change?.affected || []) if (typeof name === "string") projectNames.add(name);
-  if (state.selectedProjectName) projectNames.add(state.selectedProjectName);
-  for (const [, draft] of Object.entries(state.drafts)) if (isDraftScopeCurrent(draft.scope) && draft.scope?.kind === "project" && draft.scope.id && (changedProjectNames.has(draft.scope.id) || should("projects"))) projectNames.add(draft.scope.id);
-  for (const name of projectNames) jobs.push(loadProjectDetail(name).catch((error) => {
-    if (!error?.supersededRead) state.projectDetailErrors[name] = error instanceof Error ? error.message : "No se pudo actualizar el proyecto.";
-    throw error;
-  }));
+  const currentViewCollection = collectionForView(state.view);
+  const shouldReadCollection = (collection) => currentViewCollection === collection &&
+    (change.forceVisible || changeAffectsCollection(change, collection));
+  const addCollection = (collection, read) => {
+    jobs.push(read().catch((error) => {
+      if (!error?.supersededRead) state.collectionErrors[collection] = error instanceof Error ? error.message : "No se pudo actualizar esta vista.";
+      throw error;
+    }));
+  };
+  if (shouldReadCollection("tasks")) addCollection("tasks", loadTaskList);
+  if (shouldReadCollection("agenda")) addCollection("agenda", loadAgenda);
+  if (shouldReadCollection("statistics")) addCollection("statistics", loadStats);
+  if (shouldReadCollection("events")) addCollection("events", loadEvents);
+  if (shouldReadCollection("projects")) addCollection("projects", loadProjects);
+
+  const selectedTaskVisible = state.selectedTaskId && visibleTaskDetail;
+  const selectedTaskChanged = collections.has("tasks") || taskIds.has(state.selectedTaskId) || (target?.kind === "task" && target.id === state.selectedTaskId) ||
+    (change.affected || []).includes(state.selectedTaskId);
+  if (selectedTaskVisible && (selectedTaskChanged || (state.staleTaskDetails.has(state.selectedTaskId) && (change.forceVisible || change.refreshAll)))) {
+    const id = state.selectedTaskId;
+    jobs.push(loadTaskDetail(id).catch((error) => {
+      if (!error?.supersededRead) state.taskDetailErrors[id] = error instanceof Error ? error.message : "No se pudo actualizar el detalle.";
+      throw error;
+    }));
+  }
+
+  const selectedProjectVisible = state.selectedProjectName && visibleProjectDetail;
+  const selectedProjectChanged = collections.has("projects") || projectNames.has(state.selectedProjectName) || (target?.kind === "project" && target.id === state.selectedProjectName) ||
+    (change.affected || []).includes(state.selectedProjectName);
+  if (selectedProjectVisible && (selectedProjectChanged || (state.staleProjectDetails.has(state.selectedProjectName) && (change.forceVisible || change.refreshAll)))) {
+    const name = state.selectedProjectName;
+    jobs.push(loadProjectDetail(name).catch((error) => {
+      if (!error?.supersededRead) state.projectDetailErrors[name] = error instanceof Error ? error.message : "No se pudo actualizar el proyecto.";
+      throw error;
+    }));
+  }
+
   const results = await Promise.allSettled(jobs);
   const failures = results.filter((result) => result.status === "rejected" && !result.reason?.supersededRead);
   renderMainView();
-  if (failures.length && state.view === "detail" && state.selectedTaskId && state.taskDetailErrors[state.selectedTaskId]) {
-    showMessage(state.taskDetailErrors[state.selectedTaskId], "error");
-  }
-  if (failures.length && state.view === "projects" && state.selectedProjectName && state.projectDetailErrors[state.selectedProjectName]) {
-    showMessage(state.projectDetailErrors[state.selectedProjectName], "error");
-  }
-  return failures.length === 0;
+  const collectionPending = currentViewCollection && state.staleCollections.has(currentViewCollection);
+  const taskPending = selectedTaskVisible && state.staleTaskDetails.has(state.selectedTaskId);
+  const projectPending = selectedProjectVisible && state.staleProjectDetails.has(state.selectedProjectName);
+  return failures.length === 0 && !collectionPending && !taskPending && !projectPending;
 }
 
 function loadCurrentView() {
@@ -1644,8 +1889,28 @@ function appendCatalogOptions(select, entries, selected) {
   }
 }
 
-function queuePendingChanges(change = {}) {
+function takePendingChanges() {
+  const pending = {
+    taskIds: [...state.pendingChanges.taskIds],
+    projectNames: [...state.pendingChanges.projectNames],
+    eventNames: [...state.pendingChanges.eventNames],
+    collections: [...state.pendingChanges.collections],
+    refreshAll: state.pendingRefreshAll,
+  };
+  state.pendingRemoteRefresh = false;
+  state.pendingRefreshAll = false;
+  state.pendingChanges = { taskIds: [], projectNames: [], eventNames: [], collections: [] };
+  return pending;
+}
+
+function queuePendingChanges(change) {
   state.pendingRemoteRefresh = true;
+  if (!change || Object.keys(change).length === 0) {
+    state.pendingRefreshAll = true;
+    markLoadedResourcesStale();
+    return;
+  }
+  markChangesStale(change);
   for (const key of ["taskIds", "projectNames", "eventNames", "collections"]) {
     const values = new Set([...(state.pendingChanges[key] || []), ...(Array.isArray(change[key]) ? change[key] : [])]);
     state.pendingChanges[key] = [...values];
@@ -1679,12 +1944,16 @@ function bindStaticControls() {
       state.view = view;
       renderMainView();
       void perform("Cargando vista", async () => {
-        if (view === "tasks" && !state.taskList) await loadTaskList();
-        else if (view === "agenda" && !state.agenda) await loadAgenda();
-        else if (view === "stats" && !state.stats) await loadStats();
-        else if (view === "events" && !state.events) await loadEvents();
-        else if (view === "projects" && !state.projects) await loadProjects();
-        else if (view === "detail" && state.selectedTaskId && !state.taskDetails[state.selectedTaskId]) await loadTaskDetail(state.selectedTaskId);
+        if (view === "tasks" && (!state.taskList || state.staleCollections.has("tasks"))) await loadTaskList();
+        else if (view === "agenda" && (!state.agenda || state.staleCollections.has("agenda"))) await loadAgenda();
+        else if (view === "stats" && (!state.stats || state.staleCollections.has("statistics"))) await loadStats();
+        else if (view === "events" && (!state.events || state.staleCollections.has("events"))) await loadEvents();
+        else if (view === "projects" && (!state.projects || state.staleCollections.has("projects"))) await loadProjects();
+        if (view === "projects" && state.selectedProjectName && state.staleProjectDetails.has(state.selectedProjectName)) {
+          await loadProjectDetail(state.selectedProjectName);
+        } else if (view === "detail" && state.selectedTaskId && (!state.taskDetails[state.selectedTaskId] || state.staleTaskDetails.has(state.selectedTaskId))) {
+          await loadTaskDetail(state.selectedTaskId);
+        }
         renderMainView();
       }, { silent: true });
     });
@@ -1718,6 +1987,11 @@ subscribeStorageChanges((changes) => {
       state.settingsRevision += 1;
       state.endpointKey = endpointKey(next);
       state.readSequences = Object.create(null);
+      state.invalidationVersions = Object.create(null);
+      state.staleCollections.clear();
+      state.collectionErrors = Object.create(null);
+      state.staleTaskDetails.clear();
+      state.staleProjectDetails.clear();
       state.timeZone = null;
       state.agendaDayInitialized = false;
       state.taskList = null;
@@ -1737,6 +2011,8 @@ subscribeStorageChanges((changes) => {
       state.pendingFresh = Object.create(null);
       state.pendingRemoteRefresh = false;
       state.pendingChanges = { taskIds: [], projectNames: [], eventNames: [], collections: [] };
+      state.pendingRefreshAll = false;
+      state.confirmedOperationPendingRefresh = false;
     }
     updateConnection();
     renderHistory();
@@ -1770,20 +2046,29 @@ subscribeChanges((change) => {
     queuePendingChanges(change);
     return;
   }
-  void refreshLoadedData(change).catch(() => {});
+  markChangesStale(change);
+  renderMainView();
+  void refreshVisibleResources(change).then((complete) => {
+    renderMainView();
+    if (!complete) showMessage(visibleRefreshError(), "error");
+  }).catch(() => {});
 });
 
 window.addEventListener("focus", () => {
   void refreshLocalNotifications();
   if (document.visibilityState === "hidden" || !isReady(state.settings)) return;
   if (state.busy) queuePendingChanges();
-  else void refreshLoadedData().catch(() => {});
+  else void refreshLoadedData().then((complete) => {
+    if (!complete) showMessage(visibleRefreshError(), "error");
+  }).catch(() => {});
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refreshLocalNotifications();
   if (document.visibilityState === "visible" && isReady(state.settings)) {
     if (state.busy) queuePendingChanges();
-    else void refreshLoadedData().catch(() => {});
+    else void refreshLoadedData().then((complete) => {
+      if (!complete) showMessage(visibleRefreshError(), "error");
+    }).catch(() => {});
   }
 });
 
