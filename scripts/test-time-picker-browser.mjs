@@ -53,6 +53,39 @@ try {
   }, { resources });
   await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
   await page.locator('tr[data-task-id="task-a"]').click();
+  if (process.env.SCHEDULE_PREVIEW_TEST === "1") {
+    const daily = page.locator("#action-form-schedule-task-daily");
+    const auto = page.locator("#action-form-schedule-task-auto");
+    const edit = page.locator("#action-form-edit-task");
+    assert.equal(await daily.getByRole("button", { name: "Aplicar planificación", exact: true }).isDisabled(), true);
+    await daily.locator('[name="effortPerDay"]').fill("4p");
+    assert.match(await daily.locator(".schedule-preview").textContent(), /Tareas resultantes: 2/);
+    await edit.locator('[name="changes.totalCost"]').fill("6");
+    assert.match(await daily.locator(".schedule-preview").textContent(), /Coste por parte: 3 pomodoros/);
+    assert.match(await auto.locator(".schedule-preview").textContent(), /Guarda los cambios/);
+    assert.equal(await daily.getByRole("button", { name: "Aplicar planificación", exact: true }).isDisabled(), true);
+    await edit.locator('[name="changes.totalCost"]').fill("3");
+    const group = page.locator(".scheduling-actions");
+    assert.ok((await group.boundingBox()).height < (await edit.boundingBox()).height, "short action forms do not stretch to the edit form height");
+    if (screenshotDirectory) {
+      await mkdir(screenshotDirectory, { recursive: true });
+      await group.screenshot({ path: path.join(screenshotDirectory, `${browserType.name()}-scheduling-preview.png`) });
+    }
+    await auto.getByRole("button", { name: "Aplicar severidad", exact: true }).click();
+    await page.waitForFunction(() => window.testWrites.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.testWrites[0].parameters), {});
+    await page.waitForFunction(() => !document.querySelector("#action-form-schedule-task-daily button[type=submit]").disabled);
+    await page.evaluate(() => { window.testWrites = []; });
+    await daily.getByRole("button", { name: "Aplicar planificación", exact: true }).click();
+    await page.waitForFunction(() => window.testWrites.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.testWrites[0].parameters), { effortPerDay: "4p" });
+    await page.waitForFunction(() => !document.querySelector("#action-form-edit-task button[type=submit]").disabled);
+    await page.setViewportSize({ width: 480, height: 900 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile layout has no horizontal overflow");
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.evaluate(() => { window.testWrites = []; });
+    console.log(`PASS: real ${browserType.name()} scheduling modes, live draft preview, exact payloads and responsive layout.`);
+  }
   const form = page.locator("#action-form-edit-task");
   const button = form.locator('[data-time-picker="changes.due"]');
   const time = form.locator('[name="changes.due.time"]');

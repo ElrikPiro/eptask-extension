@@ -1,5 +1,6 @@
 import { browserTimeZone, dateTimeControlValue, dateTimeParts, dateTimeToIso, zonedControlValue } from "./date-time.js";
 import { bindTimePickers, disposeTimePickers } from "./time-picker.js";
+import { dailyEffort, schedulingPreview } from "./scheduling.js";
 import { browserApi } from "./browser-api.js";
 import { assertSuccessfulReply, clearNotificationBuffer, readGateway, submitOperation, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
@@ -140,6 +141,7 @@ function updateConnection() {
       button.disabled = !ready || state.busy;
     }
   }
+  refreshSchedulingPreviews();
   updateHistoryControls();
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.disabled = state.busy;
@@ -864,6 +866,7 @@ function renderTaskActions(task) {
   for (const action of actions) {
     if (!isPublishedAction(action)) continue;
     if (action.name === "edit-task") forms.append(renderEditTaskForm(action, task));
+    else if (action.name === "schedule-task") forms.append(renderSchedulingActions(action, task));
     else if (action.name === "complete-task" && !Object.keys(action.inputs || {}).length) continue;
     else forms.append(renderActionForm(action, task, { kind: "task", id: task.id }, `task:${task.id}`));
   }
@@ -1098,10 +1101,10 @@ function renderProjectDetail(name) {
   return section;
 }
 
-function renderActionForm(action, resource, scope, resourceType) {
+function renderActionForm(action, resource, scope, resourceType, variant = "") {
   if (!isPublishedAction(action)) return node("div");
   const ownedScope = draftScope(scope);
-  const key = draftKey(action, ownedScope);
+  const key = draftKey(action, ownedScope) + (variant ? `:${variant}` : "");
   const initialValues = {};
   for (const [field, descriptor] of Object.entries(action.inputs || {})) {
     if (field === "changes" || field === "effortDelta") continue;
@@ -1113,6 +1116,7 @@ function renderActionForm(action, resource, scope, resourceType) {
   const duplicateCollectionAction = action.name === "open-project" && scope.kind === "project" && scope.id;
   const controlScope = duplicateCollectionAction ? `project-${safeDomToken(scope.id)}` : "";
   form.id = `action-form-${action.name}${duplicateCollectionAction ? `--${controlScope}` : ""}`;
+  if (variant) form.id += `-${variant}`;
   form.dataset.draftKey = key;
   form.dataset.actionName = action.name;
   if (scope.kind === "task" && scope.id) form.dataset.taskId = scope.id;
@@ -1134,9 +1138,80 @@ function renderActionForm(action, resource, scope, resourceType) {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!form.reportValidity()) return;
+    if (variant) {
+      refreshSchedulingPreviews();
+      if (submit.disabled) return;
+    }
     void submitPublishedAction(action, resource, scope, key, form, resourceType);
   });
   return form;
+}
+
+function renderSchedulingActions(action, task) {
+  const group = node("div", null, "scheduling-actions");
+  for (const [mode, title, explanation, label] of [
+    ["daily", "Calcular entrega", "Indica cuánto quieres trabajar al día. Se recalculan la entrega y la severidad; una dedicación superior a la configurada puede dividir la tarea.", "Aplicar planificación"],
+    ["auto", "Ajustar severidad", "Calcula la severidad usando la entrega y el coste actuales. Esta opción conserva la fecha de entrega y no divide la tarea.", "Aplicar severidad"],
+  ]) {
+    const published = mode === "auto" ? { ...action, inputs: {} } : action;
+    const form = renderActionForm(published, task, { kind: "task", id: task.id }, `task:${task.id}`, mode);
+    form.dataset.scheduleMode = mode;
+    form.querySelector("h3").textContent = title;
+    const help = node("p", explanation, "caption");
+    const input = form.elements.namedItem("effortPerDay");
+    if (input) { input.required = true; input.placeholder = "30m, 2p o 01:00"; }
+    const preview = node("div", null, "schedule-preview");
+    preview.setAttribute("aria-live", "polite");
+    const submit = form.querySelector('button[type="submit"]');
+    submit.textContent = label;
+    const children = [...form.children];
+    form.replaceChildren(children[0], help, ...children.slice(1, -1), preview, submit);
+    group.append(form);
+  }
+  return group;
+}
+
+function refreshSchedulingPreviews() {
+  for (const form of mainView.querySelectorAll("form[data-schedule-mode]")) {
+    const task = state.taskDetails[form.dataset.taskId];
+    if (!task) continue;
+    const edit = mainView.querySelector("#action-form-edit-task");
+    const editAction = publishedAction(task, "edit-task");
+    const preview = form.querySelector(".schedule-preview");
+    const submit = form.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    preview.replaceChildren();
+    try {
+      const changes = edit && editAction ? collectEditChanges(editAction, task, edit, true) : {};
+      const current = { ...task, ...(changes.changes || {}) };
+      const editDraft = state.drafts[edit?.dataset.draftKey];
+      for (const field of ["start", "due", "totalCost"]) {
+        if (editDraft?.touched.includes(`changes.${field}`) && !formValues(edit)[`changes.${field}`]?.trim()) throw new Error("Completa el inicio, la entrega y el coste de la tarea para previsualizar.");
+      }
+      if (changes.changes?.totalCost) current.totalCost = { ...current.totalCost, value: String(Math.ceil(Math.trunc(Number(current.totalCost.value) * 1500000) / 60000) / 25) };
+      const configuration = publishedAction(task, "schedule-task")?.preview;
+      const result = schedulingPreview(current, configuration, form.dataset.scheduleMode, form.elements.namedItem("effortPerDay")?.value || "");
+      const deadline = new Intl.DateTimeFormat("es-ES", { timeZone: task.timeZone || browserTimeZone(), dateStyle: "medium", timeStyle: "short" }).format(new Date(result.due));
+      preview.append(node("p", "Previsualización", "strong"), node("p", `Entrega: ${deadline} (${task.timeZone || browserTimeZone()})`), node("p", `Severidad: ${finite(result.severity, 4)} · Tareas resultantes: ${result.count}`));
+      if (result.count > 1) {
+        preview.append(node("p", `Coste por parte: ${result.cost} pomodoros. Todas las partes tienen la misma entrega.`));
+        for (let part = 1; part <= Math.min(result.count, 5); part++) preview.append(node("p", `${current.description} ${part}/${result.count}`));
+        if (result.count > 5) preview.append(node("p", `Y ${result.count - 5} partes más.`));
+        preview.append(node("p", "La división actual del servidor usa 1p/día por parte y copia el esfuerzo invertido en cada una.", "caption"));
+      }
+      preview.append(node("p", `Dedicación configurada en el servidor: ${configuration.dailyDedication} pomodoros/día. El cálculo usa el coste total.`, "caption"));
+      const unsaved = editDraft?.dirty || Object.keys(changes.changes || {}).length > 0 || changes.effortDelta !== undefined;
+      if (unsaved) preview.append(node("p", "Previsualización con tus campos editados. Guarda los cambios de la tarea antes de aplicar.", "caption"));
+      else submit.disabled = state.busy || !isReady(state.settings);
+    } catch (error) {
+      preview.append(node("p", error.message, "caption"));
+      // Older servers still support the action, but cannot provide a trustworthy preview.
+      if (!publishedAction(task, "schedule-task")?.preview && !state.drafts[edit?.dataset.draftKey]?.dirty) {
+        try { if (form.dataset.scheduleMode === "daily") dailyEffort(form.elements.namedItem("effortPerDay")?.value || ""); submit.disabled = state.busy || !isReady(state.settings); }
+        catch { /* Keep invalid daily input disabled. */ }
+      }
+    }
+  }
 }
 
 function renderEditTaskForm(action, task) {
@@ -1550,7 +1625,7 @@ function collectGenericParameters(action, form) {
   return { target, parameters };
 }
 
-function collectEditChanges(action, task, form) {
+function collectEditChanges(action, task, form, allowEmpty = false) {
   const values = formValues(form);
   const draft = state.drafts[form.dataset.draftKey];
   const touched = new Set(draft?.touched || []);
@@ -1573,7 +1648,7 @@ function collectEditChanges(action, task, form) {
     if (/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(normalizedEffort)) effortDelta = { value: normalizedEffort, unit: "pomodoro" };
     else effortDelta = normalizedEffort;
   }
-  if (!Object.keys(changes).length && effortDelta === undefined) throw new Error("Cambia al menos un campo o indica el esfuerzo realizado.");
+  if (!allowEmpty && !Object.keys(changes).length && effortDelta === undefined) throw new Error("Cambia al menos un campo o indica el esfuerzo realizado.");
   return { changes, ...(effortDelta === undefined ? {} : { effortDelta }) };
 }
 
@@ -2061,10 +2136,12 @@ function bindStaticControls() {
 mainView.addEventListener("input", (event) => {
   const form = event.target.closest("form[data-draft-key]");
   if (form) captureDraft(form, event.target.dataset.ownerField || event.target.name);
+  refreshSchedulingPreviews();
 });
 mainView.addEventListener("change", (event) => {
   const form = event.target.closest("form[data-draft-key]");
   if (form) captureDraft(form, event.target.dataset.ownerField || event.target.name);
+  refreshSchedulingPreviews();
 });
 mainView.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");

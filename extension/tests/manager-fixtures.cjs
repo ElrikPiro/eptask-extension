@@ -36,7 +36,7 @@ function taskResource(id, overrides = {}) {
   ];
   if (!completed) actions.push(operationAction("complete-task", target));
   actions.push(
-    operationAction("schedule-task", target, { effortPerDay: { type: "duration", required: false } }),
+    { ...operationAction("schedule-task", target, { effortPerDay: { type: "duration", required: false } }), preview: { algorithm: "heuristic-v1", dailyDedication: 2 } },
     operationAction("record-work", target, { duration: { type: "duration", required: true } }),
     operationAction("snooze-task", target, { duration: { type: "duration", required: false, default: "5m" } }),
   );

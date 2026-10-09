@@ -10,6 +10,10 @@ En Firefox, copia `manifest.firefox.json` sobre `manifest.json`, abre `about:deb
 
 Al cambiar de navegador, copia la variante correspondiente al `manifest.json` antes de cargar o recargar la carpeta. Chromium usa un service worker y Firefox scripts de background. La suite automatizada cubre las APIs con dobles locales y Node; todavía no valida en una instalación nativa de Firefox o Chromium los diálogos de permisos ni sus almacenes de certificados.
 
+## Planificación de tareas
+
+En **Acciones disponibles para esta tarea**, la planificación tiene dos formularios independientes: **Calcular entrega**, con una dedicación diaria obligatoria, y **Ajustar severidad**, sin parámetros. El primero recalcula entrega y severidad y puede dividir la tarea; el segundo conserva la entrega y no divide. La previsualización muestra entrega, severidad, partes y coste por parte con los campos actuales, incluidos los editados. Guarda los cambios de la tarea antes de aplicar. Usa el coste total y la dedicación real publicada por el backend; un servidor anterior sigue permitiendo las acciones, pero avisa de que no dispone de previsualización. La lógica actual de división usa 1p/día por parte y copia el esfuerzo invertido a cada parte. Los formularios ocupan su propia altura.
+
 ## Preparar paquetes
 
 Desde la raíz del repositorio de la extensión, ejecuta **node scripts/package-extension.mjs**.
@@ -80,3 +84,5 @@ La suite verifica el contrato de mensajes, el control de permisos, la validació
 
 
 Con Playwright y sus navegadores de prueba instalados, **node scripts/test-time-picker-browser.mjs** verifica el popup real en Chromium. Con **TIME_PICKER_BROWSER=firefox** se ejecuta en Firefox. Se puede indicar una instalación externa de Playwright mediante **PLAYWRIGHT_MODULE** y guardar capturas con **TIME_PICKER_SCREENSHOTS**. La prueba sirve los archivos reales con la CSP de la extensión y simula únicamente las APIs del navegador y las respuestas del gateway; verifica interacción, cancelación, conservación de borradores, retirada del popup al actualizar y conversión a UTC. No sustituye las comprobaciones de permisos con una extensión instalada.
+
+Con **SCHEDULE_PREVIEW_TEST=1**, la misma prueba verifica también ambos modos de planificación, sus parámetros enviados, la previsualización al editar el coste, el bloqueo por cambios sin guardar, la altura independiente de los formularios y el diseño móvil sin desbordamiento horizontal.

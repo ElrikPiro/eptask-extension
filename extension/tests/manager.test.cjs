@@ -719,6 +719,35 @@ test("event action uses the published event identity without deriving a row posi
   assert.deepEqual(manager.writes[0].target, { kind: "event", id: "release-ready" });
 });
 
+test("schedule modes preview edited fields, block unsaved changes, and submit distinct parameters", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const daily = manager.document.querySelector("#action-form-schedule-task-daily");
+  const auto = manager.document.querySelector("#action-form-schedule-task-auto");
+  assert.ok(daily && auto);
+  assert.equal(daily.querySelector('button[type="submit"]').disabled, true);
+  assert.match(auto.querySelector(".schedule-preview").textContent, /Tareas resultantes: 1/);
+  dispatchValue(daily.elements.namedItem("effortPerDay"), "4p", "input");
+  assert.match(daily.querySelector(".schedule-preview").textContent, /Tareas resultantes: 2/);
+  assert.equal(daily.querySelector('button[type="submit"]').disabled, false);
+  const edit = manager.document.querySelector("#action-form-edit-task");
+  dispatchValue(edit.elements.namedItem("changes.description"), "Draft report", "input");
+  assert.match(daily.querySelector(".schedule-preview").textContent, /Draft report 1\/2/);
+  assert.match(daily.querySelector(".schedule-preview").textContent, /Guarda los cambios/);
+  daily.submit();
+  auto.submit();
+  await manager.flush();
+  assert.equal(manager.writes.length, 0);
+  dispatchValue(edit.elements.namedItem("changes.description"), "Task task-a", "input");
+  assert.equal(auto.querySelector('button[type="submit"]').disabled, false);
+  auto.submit();
+  await manager.flush();
+  assert.equal(manager.writes.length, 1);
+  assert.equal(manager.writes[0].type, "schedule-task");
+  assert.deepEqual(manager.writes[0].parameters, {});
+});
+
 test("record-work, schedule, and snooze submit the exact published task capability target and parameters", async (t) => {
   const scenarios = [
     { operation: "schedule-task", field: "effortPerDay", value: "1.5p", parameters: { effortPerDay: "1.5p" } },
@@ -729,7 +758,7 @@ test("record-work, schedule, and snooze submit the exact published task capabili
       const manager = await bootFixture();
       taskRow(manager.document, "task-a").click();
       await manager.flush();
-      const form = manager.document.querySelector(`#action-form-${scenario.operation}`);
+      const form = manager.document.querySelector(`#action-form-${scenario.operation}${scenario.operation === "schedule-task" ? "-daily" : ""}`);
       assert.ok(form);
       form.elements.namedItem(scenario.field).value = scenario.value;
       form.submit();

@@ -122,7 +122,10 @@ tr.orphaned { background: rgba(187, 145, 65, 0.18); }
 .key-value-row dt { color: var(--muted); }
 .key-value-row dd { margin: 0; font-weight: 700; text-align: right; overflow-wrap: anywhere; }
 .task-info-grid { margin-top: 0.2rem; }
-.forms-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 0.8rem; }
+.forms-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-top: 0.8rem; align-items: start; }
+.scheduling-actions { display: grid; gap: 0.8rem; min-width: 0; }
+.schedule-preview { border-left: 3px solid var(--primary); padding: 0.65rem; background: rgba(255, 255, 255, 0.5); }
+.schedule-preview p { margin: 0.3rem 0; }
 .forms-grid > button { place-self: start; }
 .forms-grid form { display: grid; gap: 0.5rem; padding: 0.8rem; border: 1px solid var(--border); border-radius: 0.75rem; background: rgba(255, 255, 255, 0.55); }
 form label { margin-top: 0.15rem; color: var(--muted); font-size: 0.85rem; }
