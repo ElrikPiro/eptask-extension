@@ -155,6 +155,8 @@ function bootPopup({ initialSettings = readySettings(), initialState, initialSta
   let localState = initialState || { settings: initialSettings, history: [], notificationReception: null, notificationError: "", monitorStatus: null, gatewayError: null };
   let initialReadPending = Boolean(initialStatePromise);
   const clearCalls = [];
+  const windowListeners = new Map();
+  const documentListeners = new Map();
   const document = {
     querySelector(selector) {
       const element = elements.get(selector);
@@ -164,7 +166,7 @@ function bootPopup({ initialSettings = readySettings(), initialState, initialSta
     createElement(tagName) {
       return new FakeElement(tagName);
     },
-    addEventListener() {},
+    addEventListener(type, listener) { documentListeners.set(type, listener); },
   };
   const node = (tagName, text = "", className = "") => {
     const element = document.createElement(tagName);
@@ -174,7 +176,7 @@ function bootPopup({ initialSettings = readySettings(), initialState, initialSta
   };
   const sandbox = {
     document,
-    window: { addEventListener() {} },
+    window: { addEventListener(type, listener) { windowListeners.set(type, listener); } },
     Error,
     Promise,
     browserApi: {
@@ -262,6 +264,8 @@ function bootPopup({ initialSettings = readySettings(), initialState, initialSta
     clearCalls,
     elements,
     state: () => context.__popupTest.getState(),
+    focus: () => windowListeners.get("focus")?.(),
+    visible: () => documentListeners.get("visibilitychange")?.(),
     changeSettings(settings) {
       storageListener({ "settings.v1": { newValue: settings } });
     },
@@ -813,4 +817,22 @@ test("a local notification update during initial storage hydration is not overwr
   assert.equal(env.state().notificationReception.historyId, historyId);
   assert.equal(env.elements.get("#popup-notification-list").textContent.includes("current local notice"), true);
   assert.ok(env.calls.some((call) => call.operation === "root.read"), "the hydrated connection can still start its agenda read");
+});
+
+
+test("popup focus and visibility do not reload its remote agenda", async () => {
+  const env = bootPopup({
+    respond: operation => operation === "GET_AGENDA"
+      ? Promise.resolve(success({ active_urgent_tasks: [task("task-1")] }))
+      : Promise.resolve(success({})),
+  });
+  await env.flush();
+  const reads = env.calls.length;
+  env.focus();
+  env.visible();
+  await env.flush();
+  assert.equal(env.calls.length, reads);
+  env.elements.get("#refresh-agenda").click();
+  await env.flush();
+  assert.ok(env.calls.length > reads);
 });

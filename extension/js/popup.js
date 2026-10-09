@@ -442,11 +442,9 @@ subscribeChanges((changes) => {
 
 window.addEventListener("focus", () => {
   void refreshLocalNotifications();
-  if (!agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refreshLocalNotifications();
-  if (!document.hidden && !agendaLoading && activeAction === null && settingsAreReady()) void refreshUrgentTask();
 });
 
 subscribeStorageChanges((changes) => {

@@ -115,6 +115,10 @@ test("monitor schedules one five-minute cycle and persists distinct identities b
   assert.equal(env.notificationCalls.length, 1, "new server notices in one cycle are grouped into one native alert");
   assert.doesNotMatch(JSON.stringify(received), /test-bearer-token/);
   assert.doesNotMatch(JSON.stringify(env.notificationCalls), /test-bearer-token/);
+  const invalidation = env.runtimeMessages.find(message => message.event === "changes.invalidated");
+  assert.ok(invalidation, "new notifications request a refresh of connected views");
+  assert.equal(invalidation.changes.refreshAll, true);
+  assert.ok(invalidation.changes.collections.includes("events"));
   assert.equal(notificationRequests(env).length, 1);
   assert.equal(env.requests.some((request) => new URL(request.url).pathname.endsWith("/agenda")), false, "new notices skip the urgency branch in the same cycle");
 });

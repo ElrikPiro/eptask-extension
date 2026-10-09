@@ -834,10 +834,10 @@ test("apply-fresh preserves a local due date and does not resend an untouched re
   await manager.flush();
   const form = manager.document.querySelector("#action-form-edit-task");
   const due = form.elements.namedItem("changes.due");
-  due.value = "2026-10-09T15:00:00+02:00";
+  due.value = "2026-10-09T15:00:00.000";
   due.dispatchEvent({ type: "input", bubbles: true });
 
-  manager.focus();
+  manager.invalidate({ collections: ["tasks"], taskIds: ["task-a"] });
   await manager.flush();
   const fresh = manager.document.querySelector('#stale-notice [data-action="apply-fresh"]');
   assert.ok(fresh, "remote changes are offered while the local draft remains pending");
@@ -846,12 +846,12 @@ test("apply-fresh preserves a local due date and does not resend an untouched re
 
   const updatedForm = manager.document.querySelector("#action-form-edit-task");
   assert.equal(updatedForm.elements.namedItem("changes.description").value, "Remote description");
-  assert.equal(updatedForm.elements.namedItem("changes.due").value, "2026-10-09T15:00:00+02:00");
+  assert.equal(updatedForm.elements.namedItem("changes.due").value, "2026-10-09T15:00:00.000");
   updatedForm.submit();
   await manager.flush();
 
   assert.equal(manager.writes.length, 1);
-  assert.deepEqual(manager.writes[0].parameters, { changes: { due: "2026-10-09T15:00:00+02:00" } });
+  assert.deepEqual(manager.writes[0].parameters, { changes: { due: new Date("2026-10-09T15:00:00.000").toISOString() } });
 });
 
 test("a detail refresh that receives 404 reports the failure instead of a successful refresh", async () => {
@@ -878,7 +878,7 @@ test("a late failed detail read cannot add an error after a newer detail read su
   });
   taskRow(manager.document, "task-a").click();
   await manager.flush();
-  manager.focus();
+  manager.invalidate({ collections: ["tasks"], taskIds: ["task-a"] });
   await manager.flush();
   manager.invalidate({ taskIds: ["task-a"], projectNames: [], eventNames: [], collections: ["tasks"] });
   await manager.flush();
@@ -915,7 +915,7 @@ test("a slower old task query cannot overwrite the latest query result", async (
     },
   });
 
-  manager.focus();
+  manager.invalidate({ collections: ["tasks"], taskIds: ["task-a"] });
   await manager.flush();
   assert.equal(requestNumber, 2);
   dispatchValue(manager.document.querySelector("#task-algorithm"), "EDF Algorithm");
@@ -977,4 +977,132 @@ test("a delayed initial storage snapshot cannot replace a newer connection or it
   assert.equal(manager.writes.length, 1, "the draft remains actionable under the current connection scope");
   assert.deepEqual(manager.writes[0].target, { kind: "task", id: "task-a" });
   assert.deepEqual(manager.writes[0].parameters, { changes: { description: "Draft on the new connection" } });
+});
+
+
+test("focus and visibility restore local notices without requesting remote data", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const reads = manager.reads.length;
+  manager.focus();
+  manager.document.dispatchEvent({ type: "visibilitychange" });
+  await manager.flush();
+  assert.equal(manager.reads.length, reads);
+  assert.equal(manager.document.querySelector("#action-form-edit-task"), form);
+  manager.document.querySelector('[data-action="reload"]').click();
+  await manager.flush();
+  assert.ok(manager.reads.length > reads);
+});
+
+test("completion lives in the detail header and confirmed completion returns to tasks", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const buttons = manager.document.querySelectorAll('[data-operation-name="complete-task"]');
+  assert.equal(buttons.length, 1);
+  assert.ok(buttons[0].closest(".panel-header"));
+  buttons[0].click();
+  await manager.flush();
+  assert.equal(manager.writes[0].type, "complete-task");
+  assert.equal(manager.writes[0].target.id, "task-a");
+  assert.equal(manager.document.querySelector(".task-detail-area"), null);
+  assert.ok(taskRow(manager.document, "task-b"));
+});
+
+test("failed completion keeps the selected task detail", async () => {
+  const fixture = serverFixture();
+  const manager = bootManager({ readGateway: fixture.readGateway, submitOperation: async () => { throw new Error("Server unavailable"); } });
+  await manager.flush();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  manager.document.querySelector('[data-operation-name="complete-task"]').click();
+  await manager.flush();
+  assert.equal(manager.document.querySelector(".task-detail-area").dataset.selectedTaskId, "task-a");
+});
+
+test("context comboboxes publish command prefixes and retain editable context suffixes", async () => {
+  const manager = await bootFixture();
+  const create = manager.document.querySelector("#action-form-create-task");
+  const context = create.elements.namedItem("context");
+  assert.ok(context.getAttribute("list"));
+  const options = manager.document.querySelector(`#${context.getAttribute("list")}`).querySelectorAll("option");
+  assert.deepEqual(Array.from(options, option => option.value), ["work", "home", "alert"]);
+  create.elements.namedItem("description").value = "Create outside";
+  context.value = "work/outdoor";
+  create.elements.namedItem("totalCost").value = "1.5";
+  create.submit();
+  await manager.flush();
+  assert.equal(manager.writes[0].parameters.context, "work/outdoor");
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  assert.ok(manager.document.querySelector("#action-form-edit-task").elements.namedItem("changes.context").getAttribute("list"));
+});
+
+test("calendar controls convert local dates to API timestamps and omit untouched dates", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const due = form.elements.namedItem("changes.due");
+  assert.equal(due.type, "datetime-local");
+  assert.equal(new Date(due.value).toISOString(), new Date("2026-10-07T17:00:00+02:00").toISOString());
+  due.value = "2026-12-10T15:45:00.123";
+  due.dispatchEvent({ type: "input", bubbles: true });
+  form.submit();
+  await manager.flush();
+  assert.deepEqual(manager.writes[0].parameters, { changes: { due: new Date("2026-12-10T15:45:00.123").toISOString() } });
+});
+
+test("a background broad invalidation refreshes the visible view without losing its draft", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  dispatchValue(manager.document.querySelector("#action-form-edit-task").elements.namedItem("changes.description"), "Local draft", "input");
+  const reads = manager.reads.length;
+  manager.invalidate({ collections: ["tasks", "agenda", "statistics", "events", "projects"], refreshAll: true });
+  await manager.flush();
+  assert.ok(manager.reads.length > reads);
+  assert.equal(manager.document.querySelector("#action-form-edit-task").elements.namedItem("changes.description").value, "Local draft");
+});
+
+
+test("calendar normalization does not turn a reverted date into an edited field", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  const due = form.elements.namedItem("changes.due");
+  const original = due.value;
+  dispatchValue(due, "2026-12-10T15:45", "input");
+  dispatchValue(due, original.replace(/:00\.000$/, ""), "input");
+  dispatchValue(form.elements.namedItem("changes.description"), "Only description changes", "input");
+  form.submit();
+  await manager.flush();
+  assert.deepEqual(manager.writes[0].parameters, { changes: { description: "Only description changes" } });
+});
+
+test("the calendar rejects impossible dates before sending an operation", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  dispatchValue(form.elements.namedItem("changes.due"), "2026-02-30T15:45", "input");
+  form.submit();
+  await manager.flush();
+  assert.equal(manager.writes.length, 0);
+  assert.match(manager.document.querySelector("#app-message").textContent, /fecha y hora válida/);
+});
+
+test("the calendar rejects a local time skipped during daylight saving transition", { skip: Intl.DateTimeFormat().resolvedOptions().timeZone !== "Europe/Madrid" }, async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  dispatchValue(form.elements.namedItem("changes.due"), "2026-03-29T02:30", "input");
+  form.submit();
+  await manager.flush();
+  assert.equal(manager.writes.length, 0);
+  assert.match(manager.document.querySelector("#app-message").textContent, /fecha y hora válida/);
 });

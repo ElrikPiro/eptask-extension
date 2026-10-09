@@ -160,3 +160,41 @@ test("settings control messages from popup are rejected before any network reque
   assert.equal(reply.error.kind, "unauthorized-sender");
   assert.equal(env.requests.length, 0);
 });
+
+
+test("priority monitoring invalidates only when the ordered urgent IDs change", async () => {
+  let tasks = [
+    { id: "a", description: "First", context: "work" },
+    { id: "b", description: "Second", context: "work" },
+  ];
+  const env = bootBackground({
+    initialStorage: {
+      [SETTINGS_KEY]: settings,
+      [URGENCY_KEY]: { active: true, endpoint: BASE, priorityIds: ["a", "b"] },
+    },
+    initialPermissions: [HOST_PERMISSION],
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/notifications")) return json(notificationsSnapshot([]));
+      if (path.endsWith("/agenda")) return json(agenda(tasks));
+      return json({ version: "1", timeZone: "Europe/Madrid", _links: { self: { href: BASE }, agenda: { href: `${BASE}/agenda` } } });
+    },
+  });
+  await waitFor(() => env.alarmCreates.some(alarm => alarm.name === URGENCY_ALARM), "monitor startup");
+  const invalidations = () => env.runtimeMessages.filter(message => message.event === "changes.invalidated");
+  async function cycle(count) {
+    env.fireAlarm(URGENCY_ALARM);
+    await waitFor(() => env.requests.filter(request => new URL(request.url).pathname.endsWith("/agenda")).length === count, "agenda poll");
+    for (let index = 0; index < 6; index++) await new Promise(resolve => setImmediate(resolve));
+  }
+  await cycle(1);
+  assert.equal(invalidations().length, 0, "an unchanged priority list does not reload views");
+  tasks.reverse();
+  await cycle(2);
+  assert.equal(invalidations().length, 1, "a reordered priority list reloads views");
+  assert.equal(invalidations()[0].changes.refreshAll, true);
+  assert.deepEqual(env.localData[URGENCY_KEY].priorityIds, ["b", "a"]);
+  tasks = [];
+  await cycle(3);
+  assert.equal(invalidations().length, 2, "removing the last urgent tasks also reloads views");
+});

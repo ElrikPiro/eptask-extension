@@ -1665,7 +1665,7 @@
     if (typeof action.setTitle === 'function') await callApi(action, 'setTitle', {title: title || (text === '!' ? 'ElrikPiro: error de conexión.' : text === '●' ? 'ElrikPiro: hay tareas urgentes.' : 'ElrikPiro')});
   }
 
-  async function updateUrgencyFromAgenda(data, settings, revision) {
+  async function updateUrgencyFromAgenda(data, settings, revision, notifyChanges = false) {
     const tasks = data && data._embedded && data._embedded.activeUrgentTasks;
     if (!Array.isArray(tasks) || tasks.some(task => !isObject(task) || typeof task.id !== 'string' || typeof task.context !== 'string' || typeof task.description !== 'string')) {
       fail('invalid-response');
@@ -1674,7 +1674,20 @@
     const badgeVersion = beginBadgeMutation();
     try {
       const urgent = tasks.length > 0;
-      await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {active: urgent, endpoint: settings.serverUrl, updatedAt: new Date().toISOString()}}).catch(() => {});
+      const previous = (await callApi(native.storage.local, 'get', URGENCY_KEY))[URGENCY_KEY];
+      if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
+      const priorityIds = tasks.map(task => task.id);
+      const priorityChanged = previous?.endpoint !== settings.serverUrl || JSON.stringify(previous?.priorityIds) !== JSON.stringify(priorityIds);
+      const monitoredIds = notifyChanges ? priorityIds : previous?.endpoint === settings.serverUrl ? previous.priorityIds : undefined;
+      await callApi(native.storage.local, 'set', {[URGENCY_KEY]: {
+        active: urgent,
+        ...(Array.isArray(monitoredIds) ? {priorityIds: monitoredIds} : {}),
+        endpoint: settings.serverUrl,
+        updatedAt: new Date().toISOString(),
+      }}).catch(() => {});
+      if (notifyChanges && priorityChanged && revision === configurationRevision) {
+        await broadcastChanges({collections: ['tasks', 'agenda', 'statistics'], taskIds: priorityIds, refreshAll: true});
+      }
       if (revision !== configurationRevision || badgeVersion !== badgeStateVersion) return;
       currentUrgent = urgent;
       await setBadge(currentUrgent ? '●' : '', null, badgeVersion).catch(() => {});
@@ -1834,13 +1847,15 @@
       const applied = await applyNotificationSnapshot(settings.serverUrl, snapshot, startingState.bufferGeneration, revision);
       if (applied.cancelled || revision !== configurationRevision) return;
       if (applied.newEntries.length) {
+        await broadcastChanges({collections: ['tasks', 'agenda', 'statistics', 'events', 'projects'], refreshAll: true});
+        if (revision !== configurationRevision) return;
         await emitNewNotificationBatch(applied.newEntries, revision, applied.state.bufferGeneration);
         if (revision === configurationRevision) await clearStoredError(revision).catch(() => {});
         return;
       }
       const agenda = await fetchMonitorAgenda(settings, revision, applied.state.bufferGeneration);
       if (!agenda || revision !== configurationRevision) return;
-      await updateUrgencyFromAgenda(agenda, settings, revision);
+      await updateUrgencyFromAgenda(agenda, settings, revision, true);
       if (revision !== configurationRevision) return;
       const urgentTasks = agenda?._embedded?.activeUrgentTasks;
       if (urgentTasks && urgentTasks[0] && urgentTasks[0].context === 'alert') {

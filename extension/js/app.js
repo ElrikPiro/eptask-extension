@@ -260,6 +260,7 @@ function bumpInvalidationVersion(key) {
 }
 
 function markChangesStale(change = {}) {
+  if (change.refreshAll) markLoadedResourcesStale();
   const collections = new Set(change.collections || []);
   for (const collection of collections) {
     state.staleCollections.add(collection);
@@ -830,6 +831,8 @@ function renderSelectedTaskPanel(taskId) {
   const stale = renderDraftNoticeForTarget("task", taskId);
   if (stale) section.append(stale);
   section.append(detail);
+  const complete = publishedAction(task, "complete-task");
+  if (complete && !Object.keys(complete.inputs).length) toolbar.append(renderImmediateAction(complete, { kind: "task", id: task.id }, task.description));
   section.append(renderTaskActions(task));
   return section;
 }
@@ -857,7 +860,7 @@ function renderTaskActions(task) {
   for (const action of actions) {
     if (!isPublishedAction(action)) continue;
     if (action.name === "edit-task") forms.append(renderEditTaskForm(action, task));
-    else if (action.name === "complete-task" && !Object.keys(action.inputs || {}).length) forms.append(renderImmediateAction(action, { kind: "task", id: task.id }, task.description));
+    else if (action.name === "complete-task" && !Object.keys(action.inputs || {}).length) continue;
     else forms.append(renderActionForm(action, task, { kind: "task", id: task.id }, `task:${task.id}`));
   }
   if (!forms.childElementCount) forms.append(emptyState("No hay acciones disponibles."));
@@ -1099,7 +1102,7 @@ function renderActionForm(action, resource, scope, resourceType) {
   for (const [field, descriptor] of Object.entries(action.inputs || {})) {
     if (field === "changes" || field === "effortDelta") continue;
     const initial = defaultForField(field, descriptor, resource, action);
-    initialValues[field] = initial === null || initial === undefined ? "" : String(initial);
+    initialValues[field] = descriptor.format === "date-time" ? dateTimeControlValue(initial) : initial === null || initial === undefined ? "" : String(initial);
   }
   const draft = ensureDraft(key, action, ownedScope, resource, initialValues);
   const form = node("form", null, "capability-form");
@@ -1228,8 +1231,22 @@ function ensureDraft(key, action, scope, resource, initialValues) {
 function rememberDraftBaseline(draft, form) {
   if (Object.keys(draft.originalValues || {}).length) return;
   const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.value;
+  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
   draft.originalValues = values;
+}
+
+function dateTimeControlValue(value) {
+  if (!value) return "";
+  // Keep picker values local; convert API timestamps to the browser's timezone.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/.test(String(value))) {
+    const [day, time] = String(value).split("T");
+    const [hours, minutes, seconds = "00"] = time.split(":");
+    return `${day}T${hours}:${minutes}:${Number(seconds).toFixed(3).padStart(6, "0")}`;
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (part, size = 2) => String(part).padStart(size, "0");
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
 function makeControl(name, descriptor, initialValue, draftValue, controlScope = "") {
@@ -1272,16 +1289,31 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
     control = node("input");
     if (name === "changes.totalCost" || name === "totalCost") control.type = "text";
     else if (typeList.includes("integer") || typeList.includes("number")) control.type = "number";
-    else control.type = "text";
+    else control.type = descriptor.format === "date-time" ? "datetime-local" : "text";
     if (control.type === "number") {
       control.step = typeList.includes("integer") ? "1" : "any";
       if (Number.isFinite(descriptor.minimum)) control.min = String(descriptor.minimum);
       if (Number.isFinite(descriptor.maximum)) control.max = String(descriptor.maximum);
     }
-    control.value = selectedValue ?? "";
+    control.value = descriptor.format === "date-time" ? dateTimeControlValue(selectedValue) : selectedValue ?? "";
+    if (descriptor.format === "date-time") control.step = "0.001";
     if (name === "changes.totalCost" || name === "totalCost") control.placeholder = "1.5";
     else if (name === "effortDelta") control.placeholder = "30m o 0.5";
-    else if (name.endsWith(".start") || name.endsWith(".due")) control.placeholder = "Fecha ISO con zona o expresión admitida";
+  }
+  if ((name === "context" || name === "changes.context") && control.tagName === "INPUT") {
+    const prefixes = Array.isArray(descriptor.startsWithAny) ? descriptor.startsWithAny : [];
+    const options = [...new Set(prefixes.filter(value => typeof value === "string" && value))];
+    if (options.length) {
+      const list = node("datalist");
+      list.id = `${inputId}-options`;
+      for (const value of options) {
+        const option = node("option");
+        option.value = value;
+        list.append(option);
+      }
+      control.setAttribute("list", list.id);
+      holder.append(list);
+    }
   }
   control.id = inputId;
   control.name = name;
@@ -1300,7 +1332,7 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
 function inputHelp(name, descriptor) {
   if (Array.isArray(descriptor.startsWithAny) && descriptor.startsWithAny.length) return `Prefijos admitidos: ${descriptor.startsWithAny.join(", ")}`;
   if (descriptor.format === "time-amount" || descriptor.type === "duration") return "Usa unidades como 30m, 1.5p o HH:MM.";
-  if (descriptor.format === "date-time") return "Se admiten fechas con zona horaria y expresiones de fecha del gestor.";
+  if (descriptor.format === "date-time") return `Fecha y hora en la zona de este navegador (${Intl.DateTimeFormat().resolvedOptions().timeZone}).`;
   if (name === "changes.totalCost" || name === "totalCost") return "Cantidad decimal en pomodoros; conserva los decimales escritos.";
   if (name === "changes.raised" || name === "changes.waited") return "Deja el campo vacío para quitar el evento.";
   if (name === "line") return "La numeración empieza en 1.";
@@ -1321,6 +1353,7 @@ function editFieldValue(field, task) {
   const value = task?.[field];
   if (field === "totalCost") return value && typeof value === "object" ? value.value ?? "" : "";
   if (value === null || value === undefined) return "";
+  if (field === "start" || field === "due") return dateTimeControlValue(value);
   return String(value);
 }
 
@@ -1377,7 +1410,7 @@ function captureDraft(form, changedName) {
   const draft = state.drafts[key];
   if (!draft || typeof changedName !== "string" || !changedName) return;
   const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.value;
+  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
   draft.values = { ...draft.values, ...values };
   if (String(values[changedName] ?? "") === String(draft.originalValues?.[changedName] ?? "")) {
     draft.touched = draft.touched.filter((name) => name !== changedName);
@@ -1396,7 +1429,7 @@ function updateDraftNoticeOnly() {
 
 function formValues(form) {
   const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.value;
+  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
   return values;
 }
 
@@ -1407,6 +1440,14 @@ function typedValue(value, descriptor, fieldName) {
     if (types.includes("null")) return null;
     if (descriptor.required === true && types.includes("string")) return value;
     return undefined;
+  }
+  if (descriptor.format === "date-time") {
+    const local = dateTimeControlValue(normalized);
+    const date = new Date(local);
+    if (!local || !Number.isFinite(date.getTime()) || dateTimeControlValue(date.toISOString()) !== local) {
+      throw new Error(`${labelForField(fieldName)} debe ser una fecha y hora válida en la zona de este navegador.`);
+    }
+    return date.toISOString();
   }
   if (types.includes("boolean")) return normalized === "true";
   if (types.includes("integer")) {
@@ -1573,6 +1614,10 @@ async function afterSuccessfulOperation(operationName, target, receipt) {
       state.view = "detail";
       changes.taskIds = [...new Set([...changes.taskIds, createdId])];
     }
+  }
+  if (operationName === "complete-task" && target?.id === state.selectedTaskId) {
+    state.selectedTaskId = null;
+    state.view = "tasks";
   }
   markChangesStale(changes);
   if (changes.refreshAll) markLoadedResourcesStale();
@@ -2054,22 +2099,9 @@ subscribeChanges((change) => {
   }).catch(() => {});
 });
 
-window.addEventListener("focus", () => {
-  void refreshLocalNotifications();
-  if (document.visibilityState === "hidden" || !isReady(state.settings)) return;
-  if (state.busy) queuePendingChanges();
-  else void refreshLoadedData().then((complete) => {
-    if (!complete) showMessage(visibleRefreshError(), "error");
-  }).catch(() => {});
-});
+window.addEventListener("focus", () => void refreshLocalNotifications());
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refreshLocalNotifications();
-  if (document.visibilityState === "visible" && isReady(state.settings)) {
-    if (state.busy) queuePendingChanges();
-    else void refreshLoadedData().then((complete) => {
-      if (!complete) showMessage(visibleRefreshError(), "error");
-    }).catch(() => {});
-  }
 });
 
 async function initialize() {

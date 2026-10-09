@@ -21,7 +21,7 @@ function taskResource(id, overrides = {}) {
         required: false,
         properties: {
           description: { type: "string", required: false },
-          context: { type: "string", required: false },
+          context: { type: "string", required: false, startsWithAny: ["work", "home", "alert"] },
           start: { type: "string", required: false, format: "date-time" },
           due: { type: "string", required: false, format: "date-time" },
           severity: { type: "number", required: false, finite: true },
@@ -84,7 +84,7 @@ function taskCollection(tasks, query = {}) {
     observedAt: "2026-10-05T10:00:00+02:00",
     actions: [operationAction("create-task", { kind: "tasks" }, {
       description: { type: "string", required: true },
-      context: { type: "string", required: false },
+      context: { type: "string", required: false, startsWithAny: ["work", "home", "alert"] },
       totalCost: { type: "object", required: false },
     })],
     _links: {
