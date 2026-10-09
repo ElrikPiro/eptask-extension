@@ -232,3 +232,6 @@ pre { overflow: auto; padding: 0.75rem; border-radius: 0.7rem; background: rgba(
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }
+
+.time-control, .custom-context { display: grid; gap: 0.35rem; min-width: 0; }
+.custom-context[hidden] { display: none; }

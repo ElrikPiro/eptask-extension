@@ -1230,9 +1230,7 @@ function ensureDraft(key, action, scope, resource, initialValues) {
 
 function rememberDraftBaseline(draft, form) {
   if (Object.keys(draft.originalValues || {}).length) return;
-  const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
-  draft.originalValues = values;
+  draft.originalValues = formValues(form);
 }
 
 function dateTimeControlValue(value) {
@@ -1281,6 +1279,41 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
       option.selected = String(selectedValue) === String(value);
       control.append(option);
     }
+  } else if (name === "context" || name === "changes.context") {
+    control = node("select");
+    const prefixes = Array.isArray(descriptor.startsWithAny) ? descriptor.startsWithAny : state.strategies.filters.map(filter => /^Tasks with context starting with (.+)$/.exec(filter.description || "")?.[1]);
+    const options = [...new Set(prefixes.filter(value => typeof value === "string" && value))];
+    if (selectedValue && !options.includes(String(selectedValue))) options.push(String(selectedValue));
+    const blank = node("option", "Selecciona un contexto");
+    blank.value = "";
+    control.append(blank);
+    for (const value of options) {
+      const option = node("option", value);
+      option.value = value;
+      option.selected = String(selectedValue) === value;
+      control.append(option);
+    }
+    let customValue = "__custom_context__";
+    while (options.includes(customValue)) customValue += "_";
+    control.dataset.customValue = customValue;
+    const customOption = node("option", "Escribir otro contexto…");
+    customOption.value = customValue;
+    control.append(customOption);
+    control.value = selectedValue || "";
+    const customGroup = node("div", null, "custom-context");
+    customGroup.hidden = true;
+    const customLabel = node("label", "Contexto personalizado");
+    customLabel.htmlFor = `${inputId}-custom`;
+    const custom = node("input");
+    custom.type = "text";
+    custom.id = customLabel.htmlFor;
+    custom.name = `${name}.custom`;
+    custom.dataset.ownerField = name;
+    customGroup.append(customLabel, custom);
+    control.addEventListener("change", () => {
+      customGroup.hidden = control.value !== customValue;
+    });
+    holder.append(customGroup);
   } else if (name === "description" || name === "content" || name.endsWith(".description")) {
     control = node("textarea");
     control.rows = 3;
@@ -1289,31 +1322,36 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
     control = node("input");
     if (name === "changes.totalCost" || name === "totalCost") control.type = "text";
     else if (typeList.includes("integer") || typeList.includes("number")) control.type = "number";
-    else control.type = descriptor.format === "date-time" ? "datetime-local" : "text";
+    else control.type = descriptor.format === "date-time" ? "date" : "text";
     if (control.type === "number") {
       control.step = typeList.includes("integer") ? "1" : "any";
       if (Number.isFinite(descriptor.minimum)) control.min = String(descriptor.minimum);
       if (Number.isFinite(descriptor.maximum)) control.max = String(descriptor.maximum);
     }
-    control.value = descriptor.format === "date-time" ? dateTimeControlValue(selectedValue) : selectedValue ?? "";
-    if (descriptor.format === "date-time") control.step = "0.001";
+    control.value = selectedValue ?? "";
+    if (descriptor.format === "date-time") {
+      const local = dateTimeControlValue(selectedValue) || String(selectedValue || "");
+      const [day = "", clock = ""] = local.split("T");
+      control.value = day;
+      control.dataset.dateTimePart = "date";
+      const timeLabel = node("label", `Hora de ${labelForField(name).toLowerCase()}`);
+      timeLabel.htmlFor = `${inputId}-time`;
+      const time = node("input");
+      time.type = "time";
+      time.step = "0.001";
+      time.id = timeLabel.htmlFor;
+      time.name = `${name}.time`;
+      time.dataset.ownerField = name;
+      time.value = clock;
+      const timeGroup = node("div", null, "time-control");
+      timeGroup.append(timeLabel, time);
+      holder.append(timeGroup);
+      control.addEventListener("change", () => {
+        if (control.value && !time.value) time.value = "00:00";
+      });
+    }
     if (name === "changes.totalCost" || name === "totalCost") control.placeholder = "1.5";
     else if (name === "effortDelta") control.placeholder = "30m o 0.5";
-  }
-  if ((name === "context" || name === "changes.context") && control.tagName === "INPUT") {
-    const prefixes = Array.isArray(descriptor.startsWithAny) ? descriptor.startsWithAny : [];
-    const options = [...new Set(prefixes.filter(value => typeof value === "string" && value))];
-    if (options.length) {
-      const list = node("datalist");
-      list.id = `${inputId}-options`;
-      for (const value of options) {
-        const option = node("option");
-        option.value = value;
-        list.append(option);
-      }
-      control.setAttribute("list", list.id);
-      holder.append(list);
-    }
   }
   control.id = inputId;
   control.name = name;
@@ -1323,7 +1361,7 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
   if (descriptor.minLength) control.minLength = descriptor.minLength;
   if (descriptor.maxLength) control.maxLength = descriptor.maxLength;
   if (name === "changes.totalCost" || name === "totalCost") control.inputMode = "decimal";
-  holder.append(label, control);
+  holder.prepend(label, control);
   const help = inputHelp(name, descriptor);
   if (help) holder.append(node("small", help, "caption"));
   return holder;
@@ -1409,8 +1447,7 @@ function captureDraft(form, changedName) {
   const key = form.dataset.draftKey;
   const draft = state.drafts[key];
   if (!draft || typeof changedName !== "string" || !changedName) return;
-  const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
+  const values = formValues(form);
   draft.values = { ...draft.values, ...values };
   if (String(values[changedName] ?? "") === String(draft.originalValues?.[changedName] ?? "")) {
     draft.touched = draft.touched.filter((name) => name !== changedName);
@@ -1429,7 +1466,15 @@ function updateDraftNoticeOnly() {
 
 function formValues(form) {
   const values = {};
-  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) values[control.name] = control.type === "datetime-local" ? dateTimeControlValue(control.value) : control.value;
+  for (const control of form.querySelectorAll("input[name], select[name], textarea[name]")) {
+    if (control.dataset.ownerField) continue;
+    if (control.dataset.dateTimePart === "date") {
+      const time = form.elements.namedItem(`${control.name}.time`)?.value || "";
+      values[control.name] = control.value || time ? dateTimeControlValue(`${control.value}T${time}`) || `${control.value}T${time}` : "";
+    } else if (control.dataset.customValue && control.value === control.dataset.customValue) {
+      values[control.name] = form.elements.namedItem(`${control.name}.custom`)?.value || "";
+    } else values[control.name] = control.value;
+  }
   return values;
 }
 
@@ -2010,11 +2055,11 @@ function bindStaticControls() {
 
 mainView.addEventListener("input", (event) => {
   const form = event.target.closest("form[data-draft-key]");
-  if (form) captureDraft(form, event.target.name);
+  if (form) captureDraft(form, event.target.dataset.ownerField || event.target.name);
 });
 mainView.addEventListener("change", (event) => {
   const form = event.target.closest("form[data-draft-key]");
-  if (form) captureDraft(form, event.target.name);
+  if (form) captureDraft(form, event.target.dataset.ownerField || event.target.name);
 });
 mainView.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
