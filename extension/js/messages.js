@@ -157,8 +157,9 @@ function readInvalidation(message, sender) {
       !backgroundUrls.includes(sender.url)) return null;
   if (!exactKeys(message, ["protocolVersion", "event", "changes"]) ||
       message.protocolVersion !== PROTOCOL_VERSION || message.event !== CHANGE_EVENT ||
-      !exactKeys(message.changes, ["taskIds", "projectNames", "eventNames", "collections"])) return null;
+      !exactKeys(message.changes, ["taskIds", "projectNames", "eventNames", "collections", "refreshAll"], ["taskIds", "projectNames", "eventNames", "collections"])) return null;
   const changes = message.changes;
+  if (changes.refreshAll !== undefined && typeof changes.refreshAll !== "boolean") return null;
   if (!validChangeIds(changes.taskIds) || !validChangeIds(changes.projectNames) ||
       !validChangeIds(changes.eventNames) || !Array.isArray(changes.collections) ||
       changes.collections.length > CHANGE_COLLECTIONS.size ||
@@ -169,6 +170,7 @@ function readInvalidation(message, sender) {
     projectNames: Object.freeze([...changes.projectNames]),
     eventNames: Object.freeze([...changes.eventNames]),
     collections: Object.freeze([...changes.collections]),
+    ...(changes.refreshAll !== undefined ? { refreshAll: changes.refreshAll } : {}),
   });
 }
 

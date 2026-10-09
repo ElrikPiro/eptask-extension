@@ -1180,3 +1180,21 @@ test("an incomplete date-time draft survives rerendering and cannot be submitted
   assert.equal(manager.writes.length, 0);
   assert.match(manager.document.querySelector("#app-message").textContent, /fecha y hora válida/);
 });
+
+test("a selected timezone survives refresh and changes the API instant", async () => {
+  const manager = await bootFixture();
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  assert.ok(form.querySelector('[data-time-picker="changes.due"]'));
+  setCalendar(form, "changes.due", "2026-12-10T15:45");
+  dispatchValue(form.elements.namedItem("changes.due.zone"), "Asia/Kolkata", "input");
+  manager.document.querySelector('[data-action="reload"]').click();
+  await manager.flush();
+  const refreshed = manager.document.querySelector("#action-form-edit-task");
+  assert.equal(refreshed.elements.namedItem("changes.due.zone").value, "Asia/Kolkata");
+  assert.equal(calendarValue(refreshed, "changes.due"), "2026-12-10T15:45:00.000");
+  refreshed.submit();
+  await manager.flush();
+  assert.deepEqual(manager.writes[0].parameters, { changes: { due: "2026-12-10T10:15:00.000Z" } });
+});

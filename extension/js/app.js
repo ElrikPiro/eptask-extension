@@ -1,3 +1,5 @@
+import { browserTimeZone, dateTimeControlValue, dateTimeParts, dateTimeToIso, zonedControlValue } from "./date-time.js";
+import { bindTimePickers, disposeTimePickers } from "./time-picker.js";
 import { browserApi } from "./browser-api.js";
 import { assertSuccessfulReply, clearNotificationBuffer, readGateway, submitOperation, subscribeChanges } from "./messages.js";
 import { isReady, readExtensionState, subscribeStorageChanges } from "./storage-view.js";
@@ -593,6 +595,7 @@ async function loadProjectDetail(name, { applyFresh = false } = {}) {
 }
 
 function renderMainView() {
+  disposeTimePickers();
   updateConnection();
   if (!isReady(state.settings)) {
     const section = panel("Gestor de tareas");
@@ -626,6 +629,7 @@ function renderMainView() {
   else if (state.view === "detail") fragment.append(renderTaskDetailView());
   else fragment.append(renderTasksView());
   mainView.replaceChildren(fragment);
+  bindTimePickers(mainView);
   updateConnection();
 }
 
@@ -1233,20 +1237,6 @@ function rememberDraftBaseline(draft, form) {
   draft.originalValues = formValues(form);
 }
 
-function dateTimeControlValue(value) {
-  if (!value) return "";
-  // Keep picker values local; convert API timestamps to the browser's timezone.
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/.test(String(value))) {
-    const [day, time] = String(value).split("T");
-    const [hours, minutes, seconds = "00"] = time.split(":");
-    return `${day}T${hours}:${minutes}:${Number(seconds).toFixed(3).padStart(6, "0")}`;
-  }
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "";
-  const pad = (part, size = 2) => String(part).padStart(size, "0");
-  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
-}
-
 function makeControl(name, descriptor, initialValue, draftValue, controlScope = "") {
   if (!descriptor || typeof descriptor !== "object") return null;
   const holder = node("div", null, "control-field");
@@ -1330,7 +1320,7 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
     }
     control.value = selectedValue ?? "";
     if (descriptor.format === "date-time") {
-      const local = dateTimeControlValue(selectedValue) || String(selectedValue || "");
+      const { local, timeZone } = dateTimeParts(selectedValue);
       const [day = "", clock = ""] = local.split("T");
       control.value = day;
       control.dataset.dateTimePart = "date";
@@ -1344,7 +1334,25 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
       time.dataset.ownerField = name;
       time.value = clock;
       const timeGroup = node("div", null, "time-control");
-      timeGroup.append(timeLabel, time);
+      const zone = node("input");
+      zone.type = "hidden";
+      zone.id = `${inputId}-zone`;
+      zone.name = `${name}.zone`;
+      zone.dataset.ownerField = name;
+      zone.value = timeZone;
+      const zoneLabel = node("small", `Zona horaria: ${timeZone}`, "caption");
+      zoneLabel.id = `${zone.id}-label`;
+      const choose = node("button", "Elegir hora y zona", "secondary");
+      choose.type = "button";
+      choose.dataset.timePicker = name;
+      const row = node("div", null, "time-picker-row");
+      const pickerHost = node("div");
+      pickerHost.hidden = true;
+      const pickerInput = node("input", null, "time-picker-input");
+      pickerInput.type = "text";
+      pickerHost.append(pickerInput);
+      row.append(time, choose, pickerHost);
+      timeGroup.append(timeLabel, row, zone, zoneLabel);
       holder.append(timeGroup);
       control.addEventListener("change", () => {
         if (control.value && !time.value) time.value = "00:00";
@@ -1370,7 +1378,7 @@ function makeControl(name, descriptor, initialValue, draftValue, controlScope = 
 function inputHelp(name, descriptor) {
   if (Array.isArray(descriptor.startsWithAny) && descriptor.startsWithAny.length) return `Prefijos admitidos: ${descriptor.startsWithAny.join(", ")}`;
   if (descriptor.format === "time-amount" || descriptor.type === "duration") return "Usa unidades como 30m, 1.5p o HH:MM.";
-  if (descriptor.format === "date-time") return `Fecha y hora en la zona de este navegador (${Intl.DateTimeFormat().resolvedOptions().timeZone}).`;
+  if (descriptor.format === "date-time") return "Elige la hora y la zona en el popup. La zona inicial es la de este navegador.";
   if (name === "changes.totalCost" || name === "totalCost") return "Cantidad decimal en pomodoros; conserva los decimales escritos.";
   if (name === "changes.raised" || name === "changes.waited") return "Deja el campo vacío para quitar el evento.";
   if (name === "line") return "La numeración empieza en 1.";
@@ -1470,7 +1478,8 @@ function formValues(form) {
     if (control.dataset.ownerField) continue;
     if (control.dataset.dateTimePart === "date") {
       const time = form.elements.namedItem(`${control.name}.time`)?.value || "";
-      values[control.name] = control.value || time ? dateTimeControlValue(`${control.value}T${time}`) || `${control.value}T${time}` : "";
+      const zone = form.elements.namedItem(`${control.name}.zone`)?.value || browserTimeZone();
+      values[control.name] = control.value || time ? zonedControlValue(`${control.value}T${time}`, zone) : "";
     } else if (control.dataset.customValue && control.value === control.dataset.customValue) {
       values[control.name] = form.elements.namedItem(`${control.name}.custom`)?.value || "";
     } else values[control.name] = control.value;
@@ -1487,12 +1496,8 @@ function typedValue(value, descriptor, fieldName) {
     return undefined;
   }
   if (descriptor.format === "date-time") {
-    const local = dateTimeControlValue(normalized);
-    const date = new Date(local);
-    if (!local || !Number.isFinite(date.getTime()) || dateTimeControlValue(date.toISOString()) !== local) {
-      throw new Error(`${labelForField(fieldName)} debe ser una fecha y hora válida en la zona de este navegador.`);
-    }
-    return date.toISOString();
+    try { return dateTimeToIso(normalized); }
+    catch (error) { throw new Error(`${labelForField(fieldName)}: ${error.message}`); }
   }
   if (types.includes("boolean")) return normalized === "true";
   if (types.includes("integer")) {

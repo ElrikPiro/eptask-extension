@@ -172,6 +172,10 @@ function bootManager({ readGateway, submitOperation, initialSettings, initialSta
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
 
+  const dateTimePath = path.join(extensionRoot, "js/date-time.js");
+  testModules["./date-time.js"] = vm.runInContext(compileModule(fs.readFileSync(dateTimePath, "utf8"), "./date-time.js", testModules), context, { filename: dateTimePath, timeout: 2_000 });
+  // The browser integration suite exercises the real popup and third-party DOM.
+  testModules["./time-picker.js"] = { bindTimePickers() {}, disposeTimePickers() {} };
   const renderPath = path.join(extensionRoot, "js/render.js");
   if (fs.existsSync(renderPath)) {
     const renderSource = fs.readFileSync(renderPath, "utf8");

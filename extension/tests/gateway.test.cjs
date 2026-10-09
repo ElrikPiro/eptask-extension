@@ -49,6 +49,7 @@ function loadMessages({ sendMessage, requestPermission } = {}) {
   let uuidIndex = 0;
   const browserApi = {
     runtime: {
+      id: "test-extension", getURL: file => `moz-extension://test/${file}`,
       sendMessage(message) {
         timeline.push("runtime.sendMessage");
         calls.push(JSON.parse(JSON.stringify(message)));
@@ -74,7 +75,7 @@ function loadMessages({ sendMessage, requestPermission } = {}) {
     .replace(/^import .*;\s*$/gm, "")
     .replace(/^export /gm, "") + `\n globalThis.__gatewayTest = {
       sendRequest, readGateway, submitOperation, gatewayCall, settingsMessages,
-      assertSuccessfulReply, GatewayRequestError,
+      assertSuccessfulReply, GatewayRequestError, readInvalidation,
     };`;
   const context = vm.createContext({
     browserApi,
@@ -493,4 +494,20 @@ test("reply correlation rejects a mismatched request ID without trusting the res
   });
 
   await assert.rejects(env.readGateway("root.read"), (error) => error.kind === "request-mismatch" && error.status === null);
+});
+
+
+test("background monitor invalidations admit broad refreshes and still validate sender and fields", () => {
+  const env = loadMessages();
+  const message = env.vmObject({ protocolVersion: 1, event: "changes.invalidated", changes: {
+    taskIds: [], projectNames: [], eventNames: [], collections: ["tasks", "agenda"], refreshAll: true,
+  } });
+  const sender = { id: "test-extension", url: "moz-extension://test/background.js" };
+  assert.equal(env.readInvalidation(message, sender).refreshAll, true);
+  assert.equal(env.readInvalidation(message, { ...sender, id: "another-extension" }), null);
+  message.changes.refreshAll = "yes";
+  assert.equal(env.readInvalidation(message, sender), null);
+  message.changes.refreshAll = true;
+  message.changes.unexpected = true;
+  assert.equal(env.readInvalidation(message, sender), null);
 });

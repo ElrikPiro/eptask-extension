@@ -1036,7 +1036,11 @@
 
   async function broadcastChanges(changes) {
     if (!changes || !native.runtime || typeof native.runtime.sendMessage !== 'function') return;
-    const message = {protocolVersion: PROTOCOL_VERSION, event: 'changes.invalidated', changes};
+    const payload = {
+      taskIds: changes.taskIds || [], projectNames: changes.projectNames || [], eventNames: changes.eventNames || [],
+      collections: changes.collections || [], ...(changes.refreshAll === true ? {refreshAll: true} : {}),
+    };
+    const message = {protocolVersion: PROTOCOL_VERSION, event: 'changes.invalidated', changes: payload};
     await callApi(native.runtime, 'sendMessage', message).catch(() => {});
   }
 
