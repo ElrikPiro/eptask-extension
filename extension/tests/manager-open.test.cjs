@@ -392,6 +392,7 @@ test("manager.open validates the sender and exact empty request before touching 
     { name: "foreign extension", sender: (env) => managerSender(env, "popup.html", "other-extension") },
     { name: "web page", sender: () => ({ id: "web-page", url: "https://example.test/" }) },
     { name: "query-appended extension page", sender: (env) => ({ id: env.extensionId, url: `${env.namespace.runtime.getURL("popup.html")}?manager.open` }) },
+    { name: "alpha page cannot request the canonical manager window", sender: (env) => managerSender(env, "alpha.html") },
   ];
   for (const scenario of scenarios) {
     await t.test(scenario.name, async () => {

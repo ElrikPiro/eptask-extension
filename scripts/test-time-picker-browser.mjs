@@ -7,17 +7,25 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const { chromium, firefox } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const fixture = require("../extension/tests/manager-fixtures.cjs");
-const extension = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../extension");
+const extension = path.resolve(process.env.TIME_PICKER_EXTENSION_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../extension"));
+const entryFile = process.env.TIME_PICKER_ENTRY || "index.html";
 const screenshotDirectory = process.env.TIME_PICKER_SCREENSHOTS;
 const browserType = process.env.TIME_PICKER_BROWSER === "firefox" ? firefox : chromium;
 const tasks = [fixture.taskResource("task-a")];
 const resources = { "root.read": { timeZone: "Europe/Madrid" }, "strategies.list": fixture.strategiesResource(), "tasks.list": fixture.taskCollection(tasks), "tasks.get": tasks[0] };
+async function openContainingDisclosure(locator) {
+  const disclosure = locator.locator("xpath=ancestor::details[1]");
+  if (await disclosure.count() && !(await disclosure.evaluate(element => element.open))) {
+    await disclosure.locator(":scope > summary").click();
+  }
+}
 const server = http.createServer(async (request, response) => {
   try {
     const relative = new URL(request.url, "http://localhost").pathname.slice(1) || "index.html";
     const target = path.resolve(extension, relative);
     if (!target.startsWith(`${extension}/`)) throw new Error("Invalid path");
-    response.setHeader("Content-Type", target.endsWith(".js") ? "text/javascript" : target.endsWith(".css") ? "text/css" : "text/html");
+    const contentType = target.endsWith(".js") ? "text/javascript" : target.endsWith(".css") ? "text/css" : target.endsWith(".woff2") ? "font/woff2" : target.endsWith(".svg") ? "image/svg+xml" : target.endsWith(".png") ? "image/png" : "text/html";
+    response.setHeader("Content-Type", contentType);
     response.setHeader("Content-Security-Policy", "script-src 'self'; object-src 'self'; connect-src https:;");
     response.end(await readFile(target));
   } catch { response.writeHead(404); response.end(); }
@@ -31,6 +39,7 @@ try {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("requestfailed", request => errors.push(`request failed: ${request.url()} ${request.failure()?.errorText || ""}`));
   await page.addInitScript(({ resources }) => {
     const listeners = [];
     window.testWrites = [];
@@ -51,12 +60,14 @@ try {
       storage: { onChanged: { addListener() {} }, local: { get: async () => ({ "settings.v1": { schemaVersion: 1, serverUrl: "https://tasks.example.test/team/api/v1", token: "fixture-token", monitorEnabled: true, timeoutMs: 30000 } }) } },
     };
   }, { resources });
-  await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
+  await page.goto(`http://127.0.0.1:${server.address().port}/${entryFile}`);
   await page.locator('tr[data-task-id="task-a"]').click();
   if (process.env.SCHEDULE_PREVIEW_TEST === "1") {
     const daily = page.locator("#action-form-schedule-task-daily");
     const auto = page.locator("#action-form-schedule-task-auto");
     const edit = page.locator("#action-form-edit-task");
+    await openContainingDisclosure(daily);
+    await openContainingDisclosure(edit);
     assert.equal(await daily.getByRole("button", { name: "Aplicar planificación", exact: true }).isDisabled(), true);
     await daily.locator('[name="effortPerDay"]').fill("4p");
     assert.match(await daily.locator(".schedule-preview").textContent(), /Tareas resultantes: 2/);
@@ -87,6 +98,7 @@ try {
     console.log(`PASS: real ${browserType.name()} scheduling modes, live draft preview, exact payloads and responsive layout.`);
   }
   const form = page.locator("#action-form-edit-task");
+  await openContainingDisclosure(form);
   const button = form.locator('[data-time-picker="changes.due"]');
   const time = form.locator('[name="changes.due.time"]');
   const zone = form.locator('[name="changes.due.zone"]');

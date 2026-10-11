@@ -56,6 +56,10 @@ El gestor y el popup muestran la copia guardada sin consultar la red. **Vaciar**
 
 La página principal carga tareas, agenda, estadísticas, eventos, estrategias y proyectos mediante lecturas HAL autenticadas. Cada instancia del gestor mantiene sus propios filtros, búsqueda, paginación, algoritmo, heurística, selección y formularios; una vista no cambia las consultas de otra instancia. La selección de una tarea desde la agenda pide su detalle por ID incluso si no aparece en la página actual. Un ID ausente o ambiguo produce un error visible y no selecciona otra fila.
 
+### Diseño principal Alpha
+
+La página principal del gestor, `index.html`, usa el diseño Alpha: navegación lateral, búsqueda directa, filtros plegables, formularios de tarea organizados y un historial de avisos que se abre al necesitarlo. La ruta `alpha.html` se conserva como alias para enlaces y acceso directo. Ambas páginas mantienen el origen interno de la extensión (`chrome-extension://…` o `moz-extension://…`), usan la misma configuración del perfil y consultan las mismas operaciones del servidor.
+
 Las acciones y sus campos proceden de las capacidades anunciadas por cada recurso. Las ediciones de una tarea combinan cambios de propiedades y esfuerzo en una sola operación. Los campos de identidad, estado y esfuerzo derivado no se envían como cambios. Abrir otro recurso, actualizar datos, recibir una invalidación no cambia el destino ni descarta un borrador; se puede cargar la versión remota conservando el borrador o descartarlo de forma explícita. Las mutaciones confirmadas actualizan las vistas con sus propios parámetros. Los resultados inciertos no se reenvían automáticamente.
 
 Recuperar el foco o volver a mostrar la pestaña no consulta el servidor. Las actualizaciones se solicitan con **Actualizar datos**, con una acción o consulta del usuario, o cuando el background recibe avisos nuevos o detecta un cambio en el orden de las tareas urgentes. El background conserva los IDs ordenados de la última comprobación para evitar recargas cuando la prioridad sigue igual.

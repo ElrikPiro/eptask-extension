@@ -152,7 +152,7 @@ test("a committed Firefox identity and consent declaration satisfy the same sign
     }
     await writeFile(path.join(fixtureSource, manifestName), JSON.stringify(sourceManifest, null, 2) + "\n");
   }
-  for (const fileName of ["background.js", "index.html", "options.html", "popup.html"]) {
+  for (const fileName of ["background.js", "index.html", "alpha.html", "options.html", "popup.html"]) {
     await cp(path.join(sourceRoot, fileName), path.join(fixtureSource, fileName));
   }
   for (const directoryName of ["css", "icons", "js"]) {

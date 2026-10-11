@@ -133,7 +133,7 @@ function taskRow(document, id) {
 }
 
 function navByText(document, expression) {
-  return document.querySelectorAll("[data-view]").find((button) => expression.test(button.textContent));
+  return document.querySelectorAll("[data-view]").find((button) => expression.test(button.textContent.trim()));
 }
 
 function deferred() {

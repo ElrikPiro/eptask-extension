@@ -91,7 +91,7 @@ test("all manifests permit secure background connections without broad HTTP acce
 });
 
 test("HTML and module dependency graph stays local and has no inline handlers or scripts", () => {
-  const htmlFiles = ["popup.html", "options.html", "index.html"];
+  const htmlFiles = ["popup.html", "options.html", "index.html", "alpha.html"];
   const moduleFiles = new Set();
   for (const htmlPath of htmlFiles) {
     const { content, dependencies } = localPageDependencies(htmlPath);
@@ -161,10 +161,19 @@ test("popup requests a shared manager window through the background and reports 
   assert.deepEqual(JSON.parse(read("manifest.json")).permissions.sort(), ["alarms", "notifications", "storage", "tabs"]);
 });
 
-test("legacy manager markup remains local while unsupported commands are retired by the gateway", () => {
+test("the canonical manager uses Alpha and preserves the application contract", () => {
   const html = read("index.html");
+  const alphaAlias = read("alpha.html");
   const app = read("js/app.js");
   assert.match(html, /<script type="module" src="js\/app\.js"><\/script>/);
+  assert.match(html, /<script type="module" src="js\/alpha\.js"><\/script>/);
+  assert.match(html, /href="css\/alpha\.css"/);
+  assert.match(html, /href="css\/alpha-charts\.css"/);
+  assert.match(html, /<body class="alpha-page">/);
+  assert.match(html, /id="main-view"/);
+  assert.match(html, /data-view="tasks"/);
+  assert.match(html, /<title>Gestor de tareas · ElrikPiro<\/title>/);
+  assert.equal(html.replace("<title>Gestor de tareas · ElrikPiro</title>", "<title>Tareas · ElrikPiro</title>"), alphaAlias);
   assert.doesNotMatch(app, /fetch\s*\(|XMLHttpRequest/);
   assert.match(read("js/messages.js"), /unsupported-operation/);
 });

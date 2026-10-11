@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#173b34">
+    <title>Tareas · ElrikPiro</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/vendor/timepicker-ui.css">
+    <link rel="stylesheet" href="css/alpha.css">
+    <link rel="stylesheet" href="css/alpha-charts.css">
+  </head>
+  <body class="alpha-page">
+    <a class="alpha-skip-link" href="#main-view">Saltar al contenido principal</a>
+    <div class="alpha-app-shell">
+      <aside class="alpha-sidebar">
+        <div class="alpha-brand" aria-label="ElrikPiro">
+          <span class="alpha-brand-mark" aria-hidden="true">e</span>
+          <span class="alpha-brand-name">elrikpiro<span>gestor de tareas</span></span>
+        </div>
+
+        <p class="alpha-sidebar-label">Espacio de trabajo</p>
+        <nav class="alpha-navigation" aria-label="Vistas del gestor">
+          <button type="button" data-view="tasks" aria-current="page">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6h10M9 12h10M9 18h10"/><path d="m3.5 6 .9.9L6 5.2M3.5 12l.9.9L6 11.2M3.5 18l.9.9L6 17.2"/></svg></span><span>Tareas</span>
+          </button>
+          <button type="button" class="secondary" data-view="agenda" aria-current="false">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="15" rx="2.5"/><path d="M7.5 3.5v4M16.5 3.5v4M3.5 10h17m-13 4h2m3 0h2"/></svg></span><span>Agenda</span>
+          </button>
+          <button type="button" class="secondary" data-view="stats" aria-current="false">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20V11h4v9M10 20V5h4v15m2 0v-7h4v7M3 20h18"/></svg></span><span>Estadísticas</span>
+          </button>
+          <button type="button" class="secondary" data-view="events" aria-current="false">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><path d="M8 5h3a3 3 0 0 1 3 3v1a3 3 0 0 0 3 3m-9 7h3a3 3 0 0 0 3-3v-1"/></svg></span><span>Eventos</span>
+          </button>
+          <button type="button" class="secondary" data-view="projects" aria-current="false">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M3.5 10h17"/></svg></span><span>Proyectos</span>
+          </button>
+          <span class="alpha-nav-divider" aria-hidden="true"></span>
+          <button type="button" class="secondary" data-view="detail" aria-current="false">
+            <span class="alpha-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.2 2.3 2.3 4.8-5"/></svg></span><span>Detalle de tarea</span>
+          </button>
+        </nav>
+
+        <div class="alpha-sidebar-note">
+          <span class="alpha-sidebar-note-mark" aria-hidden="true">⌘K</span>
+          <p><strong>Acceso rápido</strong><span>Buscar tareas</span></p>
+        </div>
+      </aside>
+
+      <div class="alpha-workspace">
+        <header class="alpha-topbar">
+          <div class="alpha-heading-group">
+            <p class="alpha-eyebrow">ELRIKPIRO <span aria-hidden="true">/</span> GESTOR PERSONAL</p>
+            <h1 id="alpha-page-title">Tareas</h1>
+          </div>
+          <div class="alpha-toolbar" aria-label="Acciones del gestor">
+            <button id="alpha-search-trigger" type="button" class="alpha-search-trigger secondary" aria-label="Buscar tareas, Ctrl o Comando más K">
+              <span aria-hidden="true">⌕</span><span>Buscar</span><kbd>Ctrl / ⌘ K</kbd>
+            </button>
+            <span id="connection-badge" class="status-pill offline">Desconectado</span>
+            <button id="open-options" type="button" class="secondary alpha-settings-button">
+              <span aria-hidden="true">⚙</span><span>Configuración</span>
+            </button>
+            <button type="button" data-action="refresh" class="alpha-refresh-button">
+              <span aria-hidden="true">↻</span><span>Actualizar</span>
+            </button>
+          </div>
+        </header>
+
+        <main class="alpha-main">
+          <p id="app-message" class="alert info" role="status" aria-live="polite" hidden></p>
+          <div class="alpha-view-intro">
+            <div class="alpha-view-marker" aria-hidden="true"></div>
+            <p id="alpha-view-description">Ordena lo que sigue, con el contexto que necesitas para avanzar.</p>
+          </div>
+
+          <section id="main-view" class="layout-grid" aria-label="Vista principal" tabindex="-1">
+            <section class="panel"><p class="empty">Cargando gestor…</p></section>
+          </section>
+
+          <section class="alpha-notification-panel" aria-label="Centro de notificaciones">
+            <details id="alpha-notification-disclosure">
+              <summary>
+                <span class="alpha-notification-icon" aria-hidden="true">✳</span>
+                <span class="alpha-notification-summary-copy">
+                  <strong>Centro de notificaciones</strong>
+                  <small>Avisos guardados en este dispositivo</small>
+                </span>
+                <span id="alpha-notification-count" class="alpha-notification-count">0</span>
+                <span class="alpha-disclosure-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="alpha-notification-content">
+                <div class="panel-header alpha-notification-header">
+                  <div>
+                    <h2>Historial de notificaciones</h2>
+                    <p class="caption">La copia local se puede consultar aunque no haya conexión.</p>
+                  </div>
+                  <button id="clear-history" type="button" class="secondary" disabled>Vaciar avisos guardados</button>
+                </div>
+                <p id="notification-monitor-status" class="status-line offline-text" role="status" aria-live="polite">Cargando estado de recepción…</p>
+                <div id="notification-continuity" class="notification-continuity" aria-live="polite" hidden></div>
+                <ul id="notification-list" class="notification-list"><li class="empty">Sin notificaciones guardadas.</li></ul>
+              </div>
+            </details>
+          </section>
+
+          <footer class="alpha-footer">
+            <span>ElrikPiro</span><span aria-hidden="true">·</span><span>Planifica con calma. Avanza con intención.</span>
+          </footer>
+        </main>
+      </div>
+    </div>
+    <script type="module" src="js/app.js"></script>
+    <script type="module" src="js/alpha.js"></script>
+  </body>
+</html>

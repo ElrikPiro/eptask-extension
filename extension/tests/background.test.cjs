@@ -89,6 +89,9 @@ test("sender ID, exact extension page URL, and page allowlist are checked before
     { name: "origin UUID used as runtime ID", sender: (env) => sender(env, "index.html", new URL(env.namespace.runtime.getURL("index.html")).host) },
     { name: "wrong extension origin", sender: (env) => ({ id: env.extensionId, url: "moz-extension://another-id/index.html" }) },
     { name: "query appended to a valid page URL", sender: (env) => ({ id: env.extensionId, url: `${env.namespace.runtime.getURL("index.html")}?operation=tasks.patch` }) },
+    { name: "query appended to alpha page URL", sender: (env) => ({ id: env.extensionId, url: `${env.namespace.runtime.getURL("alpha.html")}?view=tasks` }) },
+    { name: "fragment appended to alpha page URL", sender: (env) => ({ id: env.extensionId, url: `${env.namespace.runtime.getURL("alpha.html")}#tasks` }) },
+    { name: "wrong extension origin for alpha", sender: (env) => ({ id: env.extensionId, url: "moz-extension://another-id/alpha.html" }) },
     { name: "unlisted extension page", sender: (env) => sender(env, "storage-view.html") },
   ];
 
@@ -103,6 +106,36 @@ test("sender ID, exact extension page URL, and page allowlist are checked before
       assert.equal(env.permissionCalls.length, 0);
     });
   }
+});
+
+test("alpha manager page can read and mutate resources but cannot change extension settings", async () => {
+  const target = { kind: "task", id: "alpha-task" };
+  const env = boot(async (url, init) => {
+    if (init.method === "POST") {
+      assert.equal(url, `${BASE}/operations`);
+      return response(operationReceipt(OPERATION_A, "record-work", target), 201);
+    }
+    assert.equal(url, BASE);
+    return response(rootResource());
+  });
+
+  const read = await env.send(rpc("root.read"), sender(env, "alpha.html"));
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.data, rootResource());
+
+  const mutation = await env.send(rpc("operations.submit", target, {
+    id: OPERATION_A,
+    type: "record-work",
+    parameters: { duration: "0.5p" },
+  }, REQUEST_B), sender(env, "alpha.html"));
+  assert.equal(mutation.ok, true);
+  assert.equal(mutation.status, 201);
+  assert.equal(env.requests.length, 2);
+
+  const settings = await env.send(rpc("settings.disconnect", null, {}, OPERATION_A), sender(env, "alpha.html"));
+  assert.equal(settings.ok, false);
+  assert.equal(settings.error.kind, "unauthorized-sender");
+  assert.equal(env.requests.length, 2);
 });
 
 test("RPC envelope rejects wrong versions, unknown keys, non-UUID IDs, and legacy messages without fetching", async (t) => {

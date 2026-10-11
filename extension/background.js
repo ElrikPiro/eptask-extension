@@ -1264,7 +1264,7 @@
 
   function pageForSender(sender) {
     if (!sender || sender.id !== native.runtime.id || typeof sender.url !== 'string') return null;
-    for (const page of ['options.html', 'popup.html', 'index.html']) {
+    for (const page of ['options.html', 'popup.html', 'index.html', 'alpha.html']) {
       if (sender.url === native.runtime.getURL(page)) return page;
     }
     return null;
@@ -1289,7 +1289,7 @@
     if (op.startsWith('settings.') || op === 'history.clear') {
       if (page !== 'options.html') fail('unauthorized-sender');
     } else if (op === 'notifications.clear-local') {
-      if (!['options.html', 'popup.html', 'index.html'].includes(page)) fail('unauthorized-sender');
+      if (!['options.html', 'popup.html', 'index.html', 'alpha.html'].includes(page)) fail('unauthorized-sender');
     } else if (op === 'manager.open') {
       if (!['options.html', 'popup.html', 'index.html'].includes(page)) fail('unauthorized-sender');
     } else if (page === 'options.html') fail('unauthorized-sender');

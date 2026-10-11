@@ -1,0 +1,269 @@
+.alpha-work-chart {
+  min-width: 0;
+  margin: 0;
+  color: #374b3f;
+}
+
+.alpha-work-chart-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid #e6ddd0;
+  border-radius: 12px;
+  background: #faf7f0;
+}
+
+.alpha-work-chart-field {
+  display: grid;
+  gap: 5px;
+  min-width: 150px;
+}
+
+.alpha-work-chart-field > label {
+  color: #626b61;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.alpha-work-chart-field > select {
+  min-height: 38px;
+  padding: 7px 32px 7px 10px;
+  border: 1px solid #d8cbbb;
+  border-radius: 8px;
+  background: #fffefa;
+  color: #294638;
+  font: inherit;
+  font-size: 14px;
+}
+
+.alpha-work-chart-field > select:focus-visible {
+  outline: 3px solid rgba(201, 111, 85, 0.4);
+  outline-offset: 2px;
+}
+
+.alpha-work-chart-caption {
+  margin: 0 0 9px;
+  color: #555f55;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.alpha-work-chart-note {
+  margin: 0 0 10px;
+  color: #626b61;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.alpha-work-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 10px;
+  color: #555f55;
+  font-size: 12px;
+}
+
+.alpha-work-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.alpha-work-chart-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 1px solid #245941;
+  border-radius: 3px;
+  background: #39745a;
+}
+
+.alpha-work-chart-swatch.is-negative {
+  border-color: #a9553f;
+  background: #cc785e;
+}
+
+.alpha-work-chart-swatch.is-zero {
+  width: 10px;
+  height: 10px;
+  border-color: #fffefa;
+  border-radius: 50%;
+  background: #d29a4f;
+  box-shadow: 0 0 0 1px #9b7137;
+}
+
+.alpha-work-chart-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  border: 1px solid #e8dfd3;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fffefa, #fcfaf5);
+  scrollbar-color: #c9bba8 #f5f0e7;
+}
+
+.alpha-work-chart-scroll:focus-visible {
+  outline: 3px solid rgba(201, 111, 85, 0.45);
+  outline-offset: 3px;
+}
+
+.alpha-work-chart-svg {
+  display: block;
+  width: auto;
+  min-width: 100%;
+  max-width: none;
+  height: auto;
+  overflow: visible;
+}
+
+.alpha-work-axis-title {
+  fill: #626b61;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.alpha-work-grid-line {
+  stroke: #e9e4da;
+  stroke-width: 1;
+}
+
+.alpha-work-grid-line.is-zero {
+  stroke: #8e806c;
+  stroke-width: 1.6;
+}
+
+.alpha-work-y-label,
+.alpha-work-x-label {
+  fill: #555f55;
+  font-family: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.alpha-work-date-tick {
+  stroke: #bdb4a7;
+  stroke-width: 1;
+}
+
+.alpha-work-bar {
+  fill: #39745a;
+  stroke: #245941;
+  stroke-width: 0.75;
+  transition: opacity 120ms ease;
+}
+
+.alpha-work-bar.is-negative {
+  fill: #cc785e;
+  stroke: #a9553f;
+}
+
+.alpha-work-bar-group:hover .alpha-work-bar {
+  opacity: 0.78;
+}
+
+.alpha-work-zero-marker {
+  fill: #d29a4f;
+  stroke: #fffefa;
+  stroke-width: 2;
+}
+
+.alpha-work-chart-gap-label {
+  fill: #626b61;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.alpha-work-chart-data {
+  margin-top: 12px;
+  border-top: 1px solid #eee7dc;
+}
+
+.alpha-work-chart-data > summary {
+  width: fit-content;
+  padding: 11px 0 2px;
+  color: #745d48;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.alpha-work-chart-data > summary:focus-visible {
+  outline: 3px solid rgba(201, 111, 85, 0.45);
+  outline-offset: 3px;
+}
+
+.alpha-work-chart-data-note {
+  margin: 8px 0 0;
+  color: #626b61;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.alpha-work-chart-data > ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alpha-work-chart-data li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 5px 12px;
+  padding: 9px 2px;
+  border-bottom: 1px solid #eee8de;
+  color: #46564b;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.alpha-work-chart-data time {
+  color: #555f55;
+}
+
+.alpha-work-chart-empty {
+  margin: 0;
+  padding: 18px 15px;
+  border: 1px dashed #d9ccba;
+  border-radius: 11px;
+  background: #fbf7ef;
+  color: #555f55;
+  font-size: 14px;
+}
+
+@media (max-width: 600px) {
+  .alpha-work-chart-controls {
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .alpha-work-chart-field {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
+  .alpha-work-chart-scroll {
+    margin-right: -2px;
+    margin-left: -2px;
+  }
+
+  .alpha-work-chart-data > ul {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .alpha-work-chart-caption {
+    font-size: 12px;
+  }
+}

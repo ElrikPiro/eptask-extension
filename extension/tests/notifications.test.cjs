@@ -254,7 +254,7 @@ test("clearing during a history request invalidates its generation but preserves
 
   await startCycle(env);
   await waitFor(() => notificationRequests(env).length === 1, "the in-flight history GET");
-  const clearReply = await env.send(rpc("notifications.clear-local", CLEAR_REQUEST), sender(env));
+  const clearReply = await env.send(rpc("notifications.clear-local", CLEAR_REQUEST), sender(env, "alpha.html"));
   assert.equal(clearReply.ok, true);
   assert.deepEqual(JSON.parse(JSON.stringify(clearReply.data)), { cleared: true, bufferGeneration: 8 });
   assert.deepEqual(env.localData[RECEPTION_KEY].buffer, []);
