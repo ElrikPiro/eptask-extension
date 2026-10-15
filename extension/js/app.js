@@ -1471,7 +1471,7 @@ function defaultForField(name, descriptor, resource, action) {
 }
 
 function editFieldValue(field, task) {
-  const value = task?.[field];
+  const value = field === "context" ? (task?.originalContext ?? task?.context) : task?.[field];
   if (field === "totalCost") return value && typeof value === "object" ? value.value ?? "" : "";
   if (value === null || value === undefined) return "";
   if (field === "start" || field === "due") return dateTimeControlValue(value);

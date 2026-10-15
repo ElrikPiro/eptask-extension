@@ -316,7 +316,7 @@ test("only a valid no-new snapshot enables an explicit agenda check, and context
       const root = { version: "1", timeZone, _links: { self: { href: API_ROOT }, notifications: { href: `${API_ROOT}/notifications` }, agenda: { href: `${API_ROOT}/agenda` } } };
       const agenda = {
         _links: { self: { href: `${API_ROOT}/agenda` } },
-        _embedded: { activeUrgentTasks: [{ id: "urgent-a", description: `Urgent task ${SETTINGS.token}`, context }] },
+        _embedded: { activeUrgentTasks: [{ id: "urgent-a", description: `Urgent task ${SETTINGS.token}`, context, originalContext: "work" }] },
       };
       const env = boot(async (url) => {
         const path = new URL(url).pathname;

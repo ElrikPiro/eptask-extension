@@ -1227,3 +1227,30 @@ test("a selected timezone survives refresh and changes the API instant", async (
   await manager.flush();
   assert.deepEqual(manager.writes[0].parameters, { changes: { due: "2026-12-10T10:15:00.000Z" } });
 });
+
+test("inherited context is displayed while edits start from the original context", async () => {
+  const manager = await bootFixture({ detailUpdates: { "task-a": {
+    after: 1, values: { context: "alert", originalContext: "work" },
+  } } });
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  assert.equal(form.elements.namedItem("changes.context").value, "work");
+  dispatchValue(form.elements.namedItem("changes.description"), "Edited description", "input");
+  form.submit();
+  await manager.flush();
+  assert.deepEqual(manager.writes[0].parameters, { changes: { description: "Edited description" } });
+});
+
+test("editing the original context explicitly never submits the inherited value", async () => {
+  const manager = await bootFixture({ detailUpdates: { "task-a": {
+    after: 1, values: { context: "alert", originalContext: "work" },
+  } } });
+  taskRow(manager.document, "task-a").click();
+  await manager.flush();
+  const form = manager.document.querySelector("#action-form-edit-task");
+  dispatchValue(form.elements.namedItem("changes.context"), "home");
+  form.submit();
+  await manager.flush();
+  assert.deepEqual(manager.writes[0].parameters, { changes: { context: "home" } });
+});
